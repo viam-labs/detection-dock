@@ -38,18 +38,27 @@ Please use the API codebase to interact with a configured version of this servic
 
 The following attributes may be configured as detection dock service config attributes.
 
-For example: the following configuration would use "my_dock_feature_detector" to move base "my_base" to a detected "match", and then ensure docked by detecting a change in voltage with "my_power_sensor".
+For example: the following configuration would use "my_camera" to get an image to pass to "my_dock_feature_detector",  and move base "my_base" to a detected "match", and then ensure docked by detecting a change in voltage with "my_power_sensor".
 
 ```json
 {
     "power_sensor": "my_power_sensor",
     "base": "my_base",
+    "camera": "my_camera",
     "detector": "my_dock_feature_detector",
     "detection_class": "match"
 }
 ```
 
 We used a [Viam Rover](https://www.viam.com/resources/rover) for a base, but other bases can be used - you might need to tweak some of the config settings and test until working fairly reliably.
+
+ Note that you will need to include specified required components in the `depends_on` array for the service configuration, for example:
+
+```json
+      "depends_on": [
+        "my_power_sensor", "my_base", "my_camera", "my_dock_feature_detector"
+      ]
+```
 
 ### power_sensor
 
@@ -62,6 +71,12 @@ The name of the configured [power sensor](https://docs.viam.com/components/power
 *string (required)*
 
 The name of the configured [base component](https://docs.viam.com/components/base/)
+
+### camera
+
+*string (required)*
+
+The name of the configured [camera component](https://docs.viam.com/components/camera/)
 
 ### detector
 

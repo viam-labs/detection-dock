@@ -12,12 +12,20 @@ from viam.logging import getLogger
 
 from viam.components.power_sensor import PowerSensor
 from viam.components.base import Base
+from viam.components.camera import Camera
 from viam.services.vision import VisionClient
 
 import time
 import asyncio
 
 LOGGER = getLogger(__name__)
+
+class Status():
+    is_running: bool
+    is_docked: bool
+    dock_try_count: int
+    search_try_count: int
+    detection_try_count: int
 
 class detectionDock(Action, Reconfigurable):
     
@@ -26,6 +34,7 @@ class detectionDock(Action, Reconfigurable):
     
     power_sensor: PowerSensor
     base: Base
+    camera: Camera
     detector: VisionClient
     detection_class: str
     spin_velocity: int
@@ -37,7 +46,7 @@ class detectionDock(Action, Reconfigurable):
     close_percent: float
     max_search_tries: int
     max_dock_tries: int
-
+    internal_status: Status
 
     # Constructor
     @classmethod
@@ -55,6 +64,9 @@ class detectionDock(Action, Reconfigurable):
         base = config.attributes.fields["base"].string_value
         if base == "":
             raise Exception("base must be defined")
+        camera = config.attributes.fields["camera"].string_value
+        if camera == "":
+            raise Exception("camera must be defined")
         detector = config.attributes.fields["detector"].string_value
         if detector == "":
             raise Exception("detector must be defined")
@@ -72,6 +84,10 @@ class detectionDock(Action, Reconfigurable):
         base = config.attributes.fields["base"].string_value
         actual_base = dependencies[Base.get_resource_name(base)]
         self.base = cast(Base, actual_base)
+
+        camera = config.attributes.fields["camera"].string_value
+        actual_camera = dependencies[Camera.get_resource_name(camera)]
+        self.camera = cast(Camera, actual_camera)
 
         detector = config.attributes.fields["detector"].string_value
         actual_detector = dependencies[VisionClient.get_resource_name(detector)]
@@ -91,18 +107,88 @@ class detectionDock(Action, Reconfigurable):
 
         return
 
-    async def start(self) -> str:
+    async def dock(self):
+        self.internal_status.is_running = True
+        self.internal_status.is_docked = False
+        self.internal_status.search_try_count = 0
+        self.internal_status.dock_try_count = 0
+        self.internal_status.detection_try_count = 0
 
+        while (not self.internal_status.is_docked) and self.internal_status.is_running and (self.internal_status.search_try_count < self.max_search_tries) and (self.internal_status.dock_try_count < self.max_dock_tries):
+            img = await self.camera.get_image()
+            detections = await self.detector.get_detections(img)
+
+            if len(detections) == 1:
+                print(detections)
+                self.internal_status.search_try_count = 0
+
+                relative_size = (detections[0].x_max - detections[0].x_min)/img.width
+                centered = (detections[0].x_min + ((detections[0].x_max - detections[0].x_min)/2)) /img.width - .5
+
+                print(centered, relative_size)
+        
+                # try to get it more centered
+                if abs(centered) > self.center_tolerance:
+                    to_spin = (abs(centered) - self.center_tolerance)/.04
+                    if centered > 0:
+                        print("centering right " + str(to_spin))
+                        await self.base.spin(to_spin, -self.spin_velocity)
+                    else:
+                        print("centering left " + str(to_spin))
+                        await self.base.spin(to_spin, self.spin_velocity)
+                else:
+                    print("moving forward")
+                    await self.base.move_straight(self.straight_distance,self.straight_velocity)
+                    if relative_size > self.close_percent:
+                        self.internal_status.dock_try_count = self.internal_status.detection_try_count + 1
+                        docked = await self.final_dock_routine()
+                        if docked:
+                            self.internal_status.is_docked = True
+                        else:
+                            # perform a backwards move to try again
+                            await self.base.move_straight(-self.straight_distance*10, self.straight_velocity)
+                    time.sleep(.1)
+            else:
+                self.internal_status.detection_try_count = self.internal_status.detection_try_count + 1
+                if self.internal_status.detection_try_count > self.detection_try_max:
+                    print("searching")
+                    self.internal_status.search_try_count = self.internal_status.search_try_count + 1
+                    await self.base.spin(self.search_spin_deg, self.spin_velocity)
+                    self.internal_status.detection_try_count = 0
+    
+        self.internal_status.is_running = False
+
+    async def final_dock_routine(self):
+
+        current_voltage = await self.power_sensor.get_voltage()
+
+        # finish by one big forward movement then a wiggle to make sure attached to dock
+        await self.base.move_straight(self.straight_distance*5,self.straight_velocity*2)
+        await self.base.spin(self.search_spin_deg*2, self.straight_velocity)
+        await self.base.spin(self.search_spin_deg*2, -self.straight_velocity)
+        await self.base.spin(self.search_spin_deg*2, self.straight_velocity)
+        await self.base.spin(self.search_spin_deg*2, -self.straight_velocity)
+        await self.base.move_straight(self.straight_distance,self.straight_velocity*2)
+        await self.base.move_straight(int(self.straight_distance*.3),-self.straight_velocity*2)
+    
+        new_voltage = await self.power_sensor.get_voltage()
+
+        # voltage should jump up when successfully docked
+        if (new_voltage - current_voltage) > .3:
+            return True
+        else:
+            return False
+    
+    async def start(self) -> str:
+        asyncio.ensure_future(self.dock())
         return "OK"
     
     async def stop(self) -> str:
-
+        self.internal_status.is_running = False
         return "OK"
 
     async def is_running(self) -> bool:
-
-        return True
+        return self.internal_status.is_running
     
     async def status(self) -> dict:
-
-        return {}
+        return self.internal_status.__dict__

@@ -2,7 +2,7 @@ import asyncio
 
 from viam.module.module import Module
 from action_python import Action
-from .detectionDock import detectionDock
+from .dock import detectionDock
 
 async def main():
     """This function creates and starts a new module, after adding all desired resources.
