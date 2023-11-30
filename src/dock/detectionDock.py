@@ -14,6 +14,7 @@ from viam.components.power_sensor import PowerSensor
 from viam.components.base import Base
 from viam.components.camera import Camera
 from viam.services.vision import VisionClient
+from google.protobuf.struct_pb2 import Struct
 
 import time
 import asyncio
@@ -21,11 +22,11 @@ import asyncio
 LOGGER = getLogger(__name__)
 
 class Status():
-    is_running: bool
-    is_docked: bool
-    dock_try_count: int
-    search_try_count: int
-    detection_try_count: int
+    is_running: bool = False
+    is_docked: bool = False
+    dock_try_count: int = 0
+    search_try_count: int = 0
+    detection_try_count: int = 0
 
 class detectionDock(Action, Reconfigurable):
     
@@ -46,7 +47,7 @@ class detectionDock(Action, Reconfigurable):
     close_percent: float
     max_search_tries: int
     max_dock_tries: int
-    internal_status: Status
+    internal_status = Status
 
     # Constructor
     @classmethod
@@ -105,55 +106,58 @@ class detectionDock(Action, Reconfigurable):
         return
 
     async def dock(self):
+        img = await self.camera.get_image()
+
         self.internal_status.is_running = True
         self.internal_status.is_docked = False
         self.internal_status.search_try_count = 0
         self.internal_status.dock_try_count = 0
         self.internal_status.detection_try_count = 0
 
-        while (not self.internal_status.is_docked) and self.internal_status.is_running and (self.internal_status.search_try_count < self.max_search_tries) and (self.internal_status.dock_try_count < self.max_dock_tries):
-            img = await self.camera.get_image()
-            detections = await self.detector.get_detections(img)
+        try:
+            while (not self.internal_status.is_docked) and self.internal_status.is_running and (self.internal_status.search_try_count < self.max_search_tries) and (self.internal_status.dock_try_count < self.max_dock_tries):
+                img = await self.camera.get_image()
+                detections = await self.detector.get_detections(img)
 
-            if len(detections) == 1:
-                print(detections)
-                self.internal_status.search_try_count = 0
+                if len(detections) == 1:
+                    print(detections)
+                    self.internal_status.search_try_count = 0
 
-                relative_size = (detections[0].x_max - detections[0].x_min)/img.width
-                centered = (detections[0].x_min + ((detections[0].x_max - detections[0].x_min)/2)) /img.width - .5
+                    relative_size = (detections[0].x_max - detections[0].x_min)/img.width
+                    centered = (detections[0].x_min + ((detections[0].x_max - detections[0].x_min)/2)) /img.width - .5
 
-                print(centered, relative_size)
-        
-                # try to get it more centered
-                if abs(centered) > self.center_tolerance:
-                    to_spin = (abs(centered) - self.center_tolerance)/.04
-                    if centered > 0:
-                        print("centering right " + str(to_spin))
-                        await self.base.spin(to_spin, -self.spin_velocity)
-                    else:
-                        print("centering left " + str(to_spin))
-                        await self.base.spin(to_spin, self.spin_velocity)
-                else:
-                    print("moving forward")
-                    await self.base.move_straight(self.straight_distance,self.straight_velocity)
-                    if relative_size > self.close_percent:
-                        self.internal_status.dock_try_count = self.internal_status.detection_try_count + 1
-                        docked = await self.final_dock_routine()
-                        if docked:
-                            self.internal_status.is_docked = True
+                    print(centered, relative_size)
+            
+                    # try to get it more centered
+                    if abs(centered) > self.center_tolerance:
+                        to_spin = (abs(centered) - self.center_tolerance)/.04
+                        if centered > 0:
+                            print("centering right " + str(to_spin))
+                            await self.base.spin(to_spin, -self.spin_velocity)
                         else:
-                            # perform a backwards move to try again
-                            await self.base.move_straight(-self.straight_distance*10, self.straight_velocity)
-                    time.sleep(.1)
-            else:
-                self.internal_status.detection_try_count = self.internal_status.detection_try_count + 1
-                if self.internal_status.detection_try_count > self.detection_try_max:
-                    print("searching")
-                    self.internal_status.search_try_count = self.internal_status.search_try_count + 1
-                    await self.base.spin(self.search_spin_deg, self.spin_velocity)
-                    self.internal_status.detection_try_count = 0
-    
-        self.internal_status.is_running = False
+                            print("centering left " + str(to_spin))
+                            await self.base.spin(to_spin, self.spin_velocity)
+                    else:
+                        print("moving forward")
+                        await self.base.move_straight(self.straight_distance,self.straight_velocity)
+                        if relative_size > self.close_percent:
+                            self.internal_status.dock_try_count = self.internal_status.detection_try_count + 1
+                            docked = await self.final_dock_routine()
+                            if docked:
+                                self.internal_status.is_docked = True
+                            else:
+                                # perform a backwards move to try again
+                                await self.base.move_straight(-self.straight_distance*10, self.straight_velocity)
+                        time.sleep(.1)
+                else:
+                    self.internal_status.detection_try_count = self.internal_status.detection_try_count + 1
+                    if self.internal_status.detection_try_count > self.detection_try_max:
+                        print("searching")
+                        self.internal_status.search_try_count = self.internal_status.search_try_count + 1
+                        await self.base.spin(self.search_spin_deg, self.spin_velocity)
+                        self.internal_status.detection_try_count = 0
+        finally:
+            self.internal_status.is_running = False
 
     async def final_dock_routine(self):
 
@@ -167,17 +171,19 @@ class detectionDock(Action, Reconfigurable):
         await self.base.spin(self.search_spin_deg*2, -self.straight_velocity)
         await self.base.move_straight(self.straight_distance,self.straight_velocity*2)
         await self.base.move_straight(int(self.straight_distance*.3),-self.straight_velocity*2)
-    
+        time.sleep(.2)
         new_voltage = await self.power_sensor.get_voltage()
 
         # voltage should jump up when successfully docked
-        if (new_voltage - current_voltage) > .12:
+        if (new_voltage[0] - current_voltage[0]) > .12:
             return True
         else:
             return False
     
     async def start(self) -> str:
-        asyncio.ensure_future(self.dock())
+        # don't run multiple actions in parallel
+        if not self.internal_status.is_running:
+            asyncio.ensure_future(self.dock())
         return "OK"
     
     async def stop(self) -> str:
@@ -187,5 +193,11 @@ class detectionDock(Action, Reconfigurable):
     async def is_running(self) -> bool:
         return self.internal_status.is_running
     
-    async def status(self) -> dict:
-        return self.internal_status.__dict__
+    async def status(self) -> Mapping[str, Any]:
+        ret_status = { "is_running": self.internal_status.is_running,
+                      "is_docked": self.internal_status.is_docked,
+                      "dock_try_count": self.internal_status.dock_try_count,
+                      "search_try_count": self.internal_status.search_try_count,
+                      "detection_try_count": self.internal_status.detection_try_count
+                    }
+        return ret_status
