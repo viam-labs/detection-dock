@@ -70,9 +70,6 @@ class detectionDock(Action, Reconfigurable):
         detector = config.attributes.fields["detector"].string_value
         if detector == "":
             raise Exception("detector must be defined")
-        detection_class = config.attributes.fields["detection_class"].string_value
-        if detection_class == "":
-            raise Exception("detection_class must be defined")
         return
 
     # Handles attribute reconfiguration
@@ -93,7 +90,7 @@ class detectionDock(Action, Reconfigurable):
         actual_detector = dependencies[VisionClient.get_resource_name(detector)]
         self.detector = cast(VisionClient, actual_detector)
 
-        self.detection_class = config.attributes.fields["detection_class"].string_value
+        self.detection_class = config.attributes.fields["detection_class"].string_value or "match"
 
         self.spin_velocity = int(config.attributes.fields["spin_velocity"].number_value or 800)
         self.straight_velocity = int(config.attributes.fields["straight_velocity"].number_value or 350)
@@ -174,7 +171,7 @@ class detectionDock(Action, Reconfigurable):
         new_voltage = await self.power_sensor.get_voltage()
 
         # voltage should jump up when successfully docked
-        if (new_voltage - current_voltage) > .3:
+        if (new_voltage - current_voltage) > .12:
             return True
         else:
             return False
