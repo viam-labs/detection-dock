@@ -23,7 +23,7 @@ For linux:
 ``` bash
 sudo apt update && sudo apt upgrade -y
 sudo apt-get install python3
-sudo apt install python3-pip python3-venv
+sudo apt install python3-pip python3-venv git
 ```
 
 You must also have configured a [base component](https://docs.viam.com/components/base/), [vision service detector](https://docs.viam.com/services/vision/detection/), and a [power sensor](https://docs.viam.com/components/power-sensor/)
