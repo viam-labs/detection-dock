@@ -1,0 +1,13 @@
+{
+  "module_id": "viam-labs:detection-dock",
+  "visibility": "public",
+  "url": "https://github.com/viam-labs/detection-dock",
+  "description": "detection-dock is a Viam modular service that provides self-docking capabilities using a vision service detector",
+  "models": [
+    {
+      "api": "viam-labs:service:action",
+      "model": "viam-labs:dock:detection-dock"
+    }
+  ],
+  "entrypoint": "run.sh"
+}
