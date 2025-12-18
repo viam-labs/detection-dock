@@ -117,7 +117,7 @@ class detectionDock(Action, Reconfigurable):
 
         try:
             while (not self.internal_status.is_docked) and self.internal_status.is_running and (self.internal_status.search_try_count < self.max_search_tries) and (self.internal_status.dock_try_count < self.max_dock_tries):
-                imgs, _ = await self.camera.get_image()
+                imgs, _ = await self.camera.get_images()
                 img = imgs[0]
                 detections = await self.detector.get_detections(img)
 
