@@ -1,2 +1,2 @@
-viam-sdk
+viam-sdk==0.79.1
 action_api @ git+https://github.com/viam-labs/action-api.git@main
