@@ -56,9 +56,9 @@ class detectionDock(Action, Reconfigurable):
         my_class.reconfigure(config, dependencies)
         return my_class
 
-    # Validates JSON Configuration
+    # Validates JSON Configuration and declares implicit dependencies
     @classmethod
-    def validate(cls, config: ComponentConfig):
+    def validate(cls, config: ComponentConfig) -> Tuple[Sequence[str], Sequence[str]]:
         power_sensor = config.attributes.fields["power_sensor"].string_value
         if power_sensor == "":
             raise Exception("power_sensor must be defined")
@@ -71,7 +71,7 @@ class detectionDock(Action, Reconfigurable):
         detector = config.attributes.fields["detector"].string_value
         if detector == "":
             raise Exception("detector must be defined")
-        return
+        return [power_sensor, base, camera, detector], []
 
     # Handles attribute reconfiguration
     def reconfigure(self, config: ComponentConfig, dependencies: Mapping[ResourceName, ResourceBase]):

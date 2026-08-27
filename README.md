@@ -52,13 +52,6 @@ For example: the following configuration would use "my_camera" to get an image t
 
 We used a [Viam Rover](https://www.viam.com/resources/rover) for a base, but other bases can be used - you might need to tweak some of the config settings and test until working fairly reliably.
 
- Note that you will need to include specified required components in the `depends_on` array for the service configuration, for example:
-
-```json
-      "depends_on": [
-        "my_power_sensor", "my_base", "my_camera", "my_dock_feature_detector"
-      ]
-```
 
 ### power_sensor
 
