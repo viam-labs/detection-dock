@@ -7,7 +7,7 @@ The model this module makes available is viam-labs:dock:detection-dock
 Docking follows the same stages as the [Nav2 docking server](https://docs.nav2.org/rolling/tutorials/general_tutorials/using_docking/): find the dock, then run a vision-control loop that continuously refines the target while driving toward it. The approach uses Nav2's graceful control law (bearing and range estimated from the detection). There is no map or staging navigation — if the dock is not in view, the base spins until the detector sees it.
 
 1. Spin until the detector sees `detection_class`, or until the base has turned `search_spin_deg` (default two full rotations).
-2. Enter the vision-control loop. Each cycle, estimate bearing from where the detection sits in the image and range from how large it is, filter that pose, and command a smooth velocity toward it. If a depth image is available, also measure the tilt of the surface inside the detection and steer until the robot is square to that surface. While about 4 to 8 inches short of the dock, a small extra turn (at most `align_nudge_deg`) is added. It does not slow or replace the approach.
+2. Enter the vision-control loop. Each cycle, estimate bearing from where the detection sits in the image and range from how large it is, filter that pose, and command a smooth velocity toward it. If a depth image is available, also measure the tilt of the surface inside the detection and steer until the robot is square to that surface. Within about 8 inches of the dock, the turn is limited to `align_nudge_deg` so the base does not whip back and forth. Forward speed is unchanged.
 3. Leave the loop once the detection is centered within `center_tolerance` and at least `close_percent` of the image wide. With depth, the surface also has to be within `surface_yaw_tolerance_deg` of straight on. A centered detection can still be tilted, which makes the target look smaller than it does when the robot is square.
 4. If `power_sensor` is set, wait up to `wait_charge_timeout` for the voltage to rise by `charge_voltage_delta`. If it does not, back up and retry, up to `max_retries`. If `power_sensor` is omitted, reaching the target is success.
 
@@ -122,13 +122,13 @@ Meters. Range is estimated from detection size so that a detection of width `clo
 
 *float (default: 0.20)*
 
-Meters, about 8 inches. Extra heading nudge applies only while the estimated range is still this far short of the dock, and closer than about 4 inches (`0.10` m) is left to the normal approach so the robot is not asked to spin at contact.
+Meters, about 8 inches. Inside this distance the approach still drives forward, but the turn is limited to `align_nudge_deg` instead of `v_angular_max`.
 
 ### align_nudge_deg
 
-*float (default: 10)*
+*float (default: 6)*
 
-Maximum extra turn, in deg/s, during that short window. The approach velocity is otherwise unchanged.
+Maximum turn rate, in deg/s, while still within `align_distance` of the dock. The command also slews toward that rate so it cannot snap from a left turn to a right turn in one cycle.
 
 ### k_phi, k_delta, beta, lambda
 
