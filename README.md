@@ -122,7 +122,13 @@ Approach speed limits, in mm/s.
 
 *float (default: 45)*
 
-Maximum angular speed, in deg/s. Also used while searching for the dock.
+Maximum angular speed during the approach, in deg/s.
+
+### search_angular_velocity
+
+*float (default: 15)*
+
+Spin speed while searching for the dock, in deg/s.
 
 ### slowdown_radius
 

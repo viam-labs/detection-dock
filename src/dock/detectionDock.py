@@ -156,6 +156,7 @@ class detectionDock(Action, Reconfigurable):
         self.v_linear_min = _number(fields, "v_linear_min", 80.0) / 1000.0
         self.v_linear_max = _number(fields, "v_linear_max", 150.0) / 1000.0
         self.v_angular_max = math.radians(_number(fields, "v_angular_max", 45.0))
+        self.search_angular_velocity = math.radians(_number(fields, "search_angular_velocity", 15.0))
 
         self.controller_frequency = _number(fields, "controller_frequency", 8.0)
         self.initial_perception_timeout = _number(fields, "initial_perception_timeout", 15.0)
@@ -223,7 +224,7 @@ class detectionDock(Action, Reconfigurable):
             if sample is not None:
                 await self.base.stop()
                 return True
-            await self._command(0.0, self.v_angular_max)
+            await self._command(0.0, self.search_angular_velocity)
             await asyncio.sleep(1.0 / self.controller_frequency)
         await self.base.stop()
         return False
