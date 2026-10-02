@@ -7,7 +7,7 @@ The model this module makes available is viam-labs:dock:detection-dock
 Docking follows the same stages as the [Nav2 docking server](https://docs.nav2.org/rolling/tutorials/general_tutorials/using_docking/): find the dock, then run a vision-control loop that continuously refines the target while driving toward it. The approach uses Nav2's graceful control law (bearing and range estimated from the detection). There is no map or staging navigation — if the dock is not in view, the base spins until the detector sees it.
 
 1. Spin until the detector sees `detection_class`, or until the base has turned `search_spin_deg` (default two full rotations).
-2. Enter the vision-control loop. Each cycle, estimate bearing from where the detection sits in the image and range from how large it is, filter that pose, and command a smooth velocity toward it. If a depth image is available, also measure the tilt of the surface inside the detection. Heading corrections happen outside `align_distance`, where the base can still spin. Inside that distance the robot drives straight; if it is still off, it backs up and corrects there instead of spinning against the dock.
+2. Enter the vision-control loop. Each cycle, estimate bearing from where the detection sits in the image and range from how large it is, filter that pose, and command a smooth velocity toward it. If a depth image is available, also measure the tilt of the surface inside the detection. Heading corrections happen outside `align_distance`, where the base can still spin. Inside that distance the robot drives straight. If it is still off, it backs up at most `align_backup_mm`, then turns in place instead of reversing farther.
 3. Leave the loop once the detection is centered within `center_tolerance` and at least `close_percent` of the image wide. With depth, the surface also has to be within `surface_yaw_tolerance_deg` of straight on. A centered detection can still be tilted, which makes the target look smaller than it does when the robot is square.
 4. If `power_sensor` is set, wait up to `wait_charge_timeout` for the voltage to rise by `charge_voltage_delta`. If it does not, back up and retry, up to `max_retries`. If `power_sensor` is omitted, reaching the target is success.
 
@@ -122,7 +122,13 @@ Meters. Range is estimated from detection size so that a detection of width `clo
 
 *float (default: twice `docking_distance`, 0.60)*
 
-Meters. Center and square up while farther than this, then drive in without spinning. If the robot is already closer and still misaligned, it backs up past this distance and turns there. This avoids asking the base to spin where obstacle avoidance will block it.
+Meters. Center and square up while farther than this, then drive in without spinning. If the robot is already closer and still misaligned, it backs up no farther than `align_backup_mm`, then turns in place.
+
+### align_backup_mm
+
+*float (default: 150)*
+
+Maximum reverse, in millimeters, during one approach when the robot is already inside `align_distance` and still misaligned. This keeps the alignment backup from traveling into other obstacles.
 
 ### align_gain
 

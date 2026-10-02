@@ -286,6 +286,7 @@ class detectionDock(Action, Reconfigurable):
         self.docking_distance = _number(fields, "docking_distance", 0.30)
         self.align_distance = _number(fields, "align_distance", self.docking_distance * 2.0)
         self.align_gain = _number(fields, "align_gain", 2.0)
+        self.align_backup_mm = _number(fields, "align_backup_mm", 150.0)
 
         self.k_phi = _number(fields, "k_phi", 3.0)
         self.k_delta = _number(fields, "k_delta", 2.0)
@@ -385,15 +386,19 @@ class detectionDock(Action, Reconfigurable):
         filtered_center: Optional[float] = None
         filtered_size: Optional[float] = None
         filtered_yaw: Optional[float] = None
-        in_close = False
+        backed_mm = 0.0
+        backup_mark = time.monotonic()
 
         while self.internal_status.is_running and time.monotonic() < deadline:
             loop_start = time.monotonic()
+            if self.internal_status.state == "backing_up":
+                backed_mm += self.v_linear_min * 1000.0 * (loop_start - backup_mark)
+            backup_mark = loop_start
             sample = await self._detect()
             if sample is None:
+                await self.base.stop()
                 if time.monotonic() - last_seen > self.external_detection_timeout:
                     LOGGER.info("lost dock detection")
-                    await self.base.stop()
                     return False
             else:
                 last_seen = time.monotonic()
@@ -426,17 +431,11 @@ class detectionDock(Action, Reconfigurable):
                     await self.base.stop()
                     return True
 
-                # Obstacle avoidance blocks spin against the dock, so finish heading
-                # corrections outside align_distance. Inside that range, drive straight
-                # or back up until there is room to turn.
+                # Turn while still outside align_distance. A short backup is allowed once
+                # inside that range; after align_backup_mm, turn in place instead of
+                # reversing farther into the room.
                 misaligned = abs(filtered_center) > self.center_tolerance or not squared
-                if in_close:
-                    if distance >= self.align_distance * 1.25:
-                        in_close = False
-                elif distance <= self.align_distance:
-                    in_close = True
-
-                if misaligned and in_close:
+                if misaligned and distance <= self.align_distance and backed_mm < self.align_backup_mm:
                     self.internal_status.state = "backing_up"
                     linear, angular = -self.v_linear_min, 0.0
                 elif misaligned:
@@ -449,7 +448,7 @@ class detectionDock(Action, Reconfigurable):
                     # The graceful controller's goal yaw is opposite the usual left-positive heading.
                     goal_yaw = -filtered_yaw if filtered_yaw is not None else psi
                     linear, angular = self._approach_velocity(psi, distance, goal_yaw)
-                    if in_close:
+                    if distance <= self.align_distance:
                         angular = 0.0
                 await self._command(linear, angular)
 
