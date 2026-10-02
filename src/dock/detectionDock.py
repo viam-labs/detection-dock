@@ -284,6 +284,8 @@ class detectionDock(Action, Reconfigurable):
         self.center_tolerance = _number(fields, "center_tolerance", 0.05)
         self.surface_yaw_tolerance = math.radians(_number(fields, "surface_yaw_tolerance_deg", 5.0))
         self.docking_distance = _number(fields, "docking_distance", 0.30)
+        self.align_distance = _number(fields, "align_distance", self.docking_distance * 2.0)
+        self.align_gain = _number(fields, "align_gain", 2.0)
 
         self.k_phi = _number(fields, "k_phi", 3.0)
         self.k_delta = _number(fields, "k_delta", 2.0)
@@ -383,6 +385,7 @@ class detectionDock(Action, Reconfigurable):
         filtered_center: Optional[float] = None
         filtered_size: Optional[float] = None
         filtered_yaw: Optional[float] = None
+        in_close = False
 
         while self.internal_status.is_running and time.monotonic() < deadline:
             loop_start = time.monotonic()
@@ -423,9 +426,31 @@ class detectionDock(Action, Reconfigurable):
                     await self.base.stop()
                     return True
 
-                # The graceful controller's goal yaw is opposite the usual left-positive heading.
-                goal_yaw = -filtered_yaw if filtered_yaw is not None else psi
-                linear, angular = self._approach_velocity(psi, distance, goal_yaw)
+                # Obstacle avoidance blocks spin against the dock, so finish heading
+                # corrections outside align_distance. Inside that range, drive straight
+                # or back up until there is room to turn.
+                misaligned = abs(filtered_center) > self.center_tolerance or not squared
+                if in_close:
+                    if distance >= self.align_distance * 1.25:
+                        in_close = False
+                elif distance <= self.align_distance:
+                    in_close = True
+
+                if misaligned and in_close:
+                    self.internal_status.state = "backing_up"
+                    linear, angular = -self.v_linear_min, 0.0
+                elif misaligned:
+                    self.internal_status.state = "aligning"
+                    error = psi if filtered_yaw is None else _wrap(filtered_yaw + psi)
+                    angular = max(-self.v_angular_max, min(self.v_angular_max, error * self.align_gain))
+                    linear = 0.0
+                else:
+                    self.internal_status.state = "approaching"
+                    # The graceful controller's goal yaw is opposite the usual left-positive heading.
+                    goal_yaw = -filtered_yaw if filtered_yaw is not None else psi
+                    linear, angular = self._approach_velocity(psi, distance, goal_yaw)
+                    if in_close:
+                        angular = 0.0
                 await self._command(linear, angular)
 
             elapsed = time.monotonic() - loop_start
