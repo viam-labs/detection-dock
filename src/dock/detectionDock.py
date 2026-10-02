@@ -295,9 +295,12 @@ class detectionDock(Action, Reconfigurable):
         self.v_linear_max = _number(fields, "v_linear_max", 150.0) / 1000.0
         self.v_angular_max = math.radians(_number(fields, "v_angular_max", 45.0))
         # Near the dock the curvature term saturates and then reverses, which
-        # is the violent swing. Cap the turn there; do not add a second steering term.
+        # is the violent swing. Cap the turn on the way in. Once inside
+        # micro_distance, abandon that law and creep forward, back, or in yaw.
         self.close_angular_max = math.radians(_number(fields, "close_angular_max", 12.0))
         self.close_angular_slew = math.radians(30.0)
+        self.micro_distance = 0.12
+        self.micro_linear = min(self.v_linear_min, 0.04)
         self.search_angular_velocity = math.radians(_number(fields, "search_angular_velocity", 15.0))
         self.search_spin_deg = _number(fields, "search_spin_deg", 720.0)
 
@@ -387,7 +390,9 @@ class detectionDock(Action, Reconfigurable):
         filtered_center: Optional[float] = None
         filtered_size: Optional[float] = None
         filtered_yaw: Optional[float] = None
+        commanded_linear = 0.0
         commanded_angular = 0.0
+        micro = False
 
         while self.internal_status.is_running and time.monotonic() < deadline:
             loop_start = time.monotonic()
@@ -429,13 +434,32 @@ class detectionDock(Action, Reconfigurable):
                     return True
 
                 # The graceful controller's goal yaw is opposite the usual left-positive heading.
-                goal_yaw = -filtered_yaw if filtered_yaw is not None else psi
-                linear, angular = self._approach_velocity(psi, distance, goal_yaw)
+                # Inside micro_distance that law stalls, because forward speed collapses with
+                # curvature. Creep forward, back, or in yaw instead. Stay in that mode until
+                # the dock is clearly farther again, so a small reverse does not hand control back.
                 remaining = distance - self.docking_distance
-                if remaining <= max(self.slowdown_radius, 0.15):
-                    angular = max(-self.close_angular_max, min(self.close_angular_max, angular))
+                if remaining <= self.micro_distance:
+                    if not micro:
+                        LOGGER.info("micro-adjusting near the dock")
+                    micro = True
+                elif remaining > self.micro_distance + 0.08:
+                    micro = False
+
+                if micro:
+                    linear, angular = self._micro_velocity(psi, filtered_size, filtered_yaw)
+                else:
+                    goal_yaw = -filtered_yaw if filtered_yaw is not None else psi
+                    linear, angular = self._approach_velocity(psi, distance, goal_yaw)
+                    if remaining <= max(self.slowdown_radius, 0.15):
+                        angular = max(-self.close_angular_max, min(self.close_angular_max, angular))
+
+                if micro or remaining <= max(self.slowdown_radius, 0.15):
                     step = self.close_angular_slew / max(self.controller_frequency, 1.0)
                     angular = commanded_angular + max(-step, min(step, angular - commanded_angular))
+                if micro:
+                    linear_step = 0.15 / max(self.controller_frequency, 1.0)
+                    linear = commanded_linear + max(-linear_step, min(linear_step, linear - commanded_linear))
+                commanded_linear = linear
                 commanded_angular = angular
                 await self._command(linear, angular)
 
@@ -444,6 +468,22 @@ class detectionDock(Action, Reconfigurable):
 
         await self.base.stop()
         return False
+
+    def _micro_velocity(self, psi: float, filtered_size: float, filtered_yaw: Optional[float]) -> Tuple[float, float]:
+        """Small correction once the dock is close. Heading is left-positive."""
+        size_error = self.close_percent - filtered_size
+        linear = self.micro_linear * max(-1.0, min(1.0, size_error / 0.10))
+        if size_error > 0.01:
+            linear = max(linear, 0.03)
+        elif size_error < -0.02:
+            linear = min(linear, -0.03)
+
+        heading = psi if filtered_yaw is None else psi + filtered_yaw
+        angular = max(-self.close_angular_max, min(self.close_angular_max, heading))
+        if abs(heading) > math.radians(3.0):
+            floor = min(self.close_angular_max, math.radians(5.0))
+            angular = math.copysign(max(abs(angular), floor), heading)
+        return linear, angular
 
     def _approach_velocity(self, psi: float, distance: float, goal_yaw: float) -> Tuple[float, float]:
         goal_dist = max(distance - self.docking_distance, 1e-3)

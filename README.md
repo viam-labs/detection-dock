@@ -7,7 +7,7 @@ The model this module makes available is viam-labs:dock:detection-dock
 Docking follows the same stages as the [Nav2 docking server](https://docs.nav2.org/rolling/tutorials/general_tutorials/using_docking/): find the dock, then run a vision-control loop that continuously refines the target while driving toward it. The approach uses Nav2's graceful control law (bearing and range estimated from the detection). There is no map or staging navigation — if the dock is not in view, the base spins until the detector sees it.
 
 1. Spin until the detector sees `detection_class`, or until the base has turned `search_spin_deg` (default two full rotations).
-2. Enter the vision-control loop. Each cycle, estimate bearing from where the detection sits in the image and range from how large it is, filter that pose, and command a smooth velocity toward it. If a depth image is available, also measure the tilt of the surface inside the detection and steer until the robot is square to that surface. Inside the slowdown distance the turn is limited to `close_angular_max`, so a detection that crosses center cannot whip the base from a hard left to a hard right. Forward speed is unchanged.
+2. Enter the vision-control loop. Each cycle, estimate bearing from where the detection sits in the image and range from how large it is, filter that pose, and command a smooth velocity toward it. If a depth image is available, also measure the tilt of the surface inside the detection and steer until the robot is square to that surface. Inside the slowdown distance the turn is limited to `close_angular_max`. Within about 5 inches, that law is replaced by small moves: creep forward if the detection is still small, creep back if it is already too large, and turn slowly to fix bearing and surface tilt.
 3. Leave the loop once the detection is centered within `center_tolerance` and at least `close_percent` of the image wide. With depth, the surface also has to be within `surface_yaw_tolerance_deg` of straight on. A centered detection can still be tilted, which makes the target look smaller than it does when the robot is square.
 4. If `power_sensor` is set, wait up to `wait_charge_timeout` for the voltage to rise by `charge_voltage_delta`. If it does not, back up and retry, up to `max_retries`. If `power_sensor` is omitted, reaching the target is success.
 
@@ -140,7 +140,7 @@ Maximum angular speed during the approach, in deg/s. Inside the slowdown distanc
 
 *float (default: 12)*
 
-Maximum turn rate, in deg/s, once the estimated range is within `slowdown_radius` of the dock (at least about 6 inches). The command also eases toward that rate so it cannot reverse in one control cycle.
+Maximum turn rate, in deg/s, once the estimated range is within `slowdown_radius` of the dock (at least about 6 inches), and during the final micro-adjustments. The command eases toward that rate so it cannot reverse in one control cycle.
 
 ### search_angular_velocity
 
