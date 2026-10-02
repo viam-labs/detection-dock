@@ -284,7 +284,8 @@ class detectionDock(Action, Reconfigurable):
         self.center_tolerance = _number(fields, "center_tolerance", 0.05)
         self.surface_yaw_tolerance = math.radians(_number(fields, "surface_yaw_tolerance_deg", 5.0))
         self.docking_distance = _number(fields, "docking_distance", 0.30)
-        self.align_distance = _number(fields, "align_distance", 0.15)
+        self.align_distance = _number(fields, "align_distance", 0.20)
+        self.align_near = 0.10
         self.align_nudge = math.radians(_number(fields, "align_nudge_deg", 10.0))
 
         self.k_phi = _number(fields, "k_phi", 3.0)
@@ -425,14 +426,14 @@ class detectionDock(Action, Reconfigurable):
                     await self.base.stop()
                     return True
 
-                # Same approach as before the 0.3.5 alignment takeover. A few inches
-                # short of the dock, add a small turn. It does not replace the drive.
+                # Same approach as before the 0.3.5 alignment takeover. Between about
+                # 4 and 8 inches short of the dock, add a small turn. It does not replace the drive.
                 # The graceful controller's goal yaw is opposite the usual left-positive heading.
                 self.internal_status.state = "approaching"
                 goal_yaw = -filtered_yaw if filtered_yaw is not None else psi
                 linear, angular = self._approach_velocity(psi, distance, goal_yaw)
                 remaining = distance - self.docking_distance
-                if 0.05 < remaining <= self.align_distance:
+                if self.align_near < remaining <= self.align_distance:
                     error = filtered_yaw if filtered_yaw is not None else psi
                     extra = max(-self.align_nudge, min(self.align_nudge, error))
                     angular = max(-self.v_angular_max, min(self.v_angular_max, angular + extra))
