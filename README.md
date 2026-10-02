@@ -7,8 +7,8 @@ The model this module makes available is viam-labs:dock:detection-dock
 Docking follows the same stages as the [Nav2 docking server](https://docs.nav2.org/rolling/tutorials/general_tutorials/using_docking/): find the dock, then run a vision-control loop that continuously refines the target while driving toward it. The approach uses Nav2's graceful control law (bearing and range estimated from the detection). There is no map or staging navigation — if the dock is not in view, the base spins until the detector sees it.
 
 1. Spin until the detector sees `detection_class`, or until the base has turned `search_spin_deg` (default two full rotations).
-2. Enter the vision-control loop. Each cycle, estimate bearing from where the detection sits in the image and range from how large it is, filter that pose, and command a smooth velocity toward it.
-3. Leave the loop once the detection is centered within `center_tolerance` and at least `close_percent` of the image wide.
+2. Enter the vision-control loop. Each cycle, estimate bearing from where the detection sits in the image and range from how large it is, filter that pose, and command a smooth velocity toward it. If a depth image is available, also measure the tilt of the surface inside the detection and steer until the robot is square to that surface.
+3. Leave the loop once the detection is centered within `center_tolerance` and at least `close_percent` of the image wide. With depth, the surface also has to be within `surface_yaw_tolerance_deg` of straight on. A centered detection can still be tilted, which makes the target look smaller than it does when the robot is square.
 4. If `power_sensor` is set, wait up to `wait_charge_timeout` for the voltage to rise by `charge_voltage_delta`. If it does not, back up and retry, up to `max_retries`. If `power_sensor` is omitted, reaching the target is success.
 
 This has been tested with [feature match detection](https://github.com/viam-labs/feature-match-detector) configured as a vision detector, but other detector types should work, as well.
@@ -62,13 +62,19 @@ The name of the configured [base component](https://docs.viam.com/components/bas
 
 *string (required)*
 
-The name of the configured [camera component](https://docs.viam.com/components/camera/)
+The name of the configured [camera component](https://docs.viam.com/components/camera/). If `get_images` also returns an `image/vnd.viam.dep` depth frame, it is used to square the robot to the dock surface. That depth frame should be aligned with the color image.
 
 ### detector
 
 *string (required)*
 
 The name of the configured [vision service detector](https://docs.viam.com/services/vision/detection/)
+
+### depth_camera
+
+*string (optional)*
+
+A separate [camera](https://docs.viam.com/components/camera/) to read depth from, when the color camera does not include a depth image. Ignored when the color camera already returns depth.
 
 ### power_sensor
 
@@ -99,6 +105,12 @@ Detection width, as a fraction of the image, that counts as having reached the d
 *float (default: 0.05)*
 
 How far the detection center may sit from the image center, as a fraction of image width, and still count as aligned. `0.05` is 5 percent.
+
+### surface_yaw_tolerance_deg
+
+*float (default: 5)*
+
+How many degrees the dock surface may tilt, left versus right in the depth image, and still count as square. Used only when depth is available. `bearing_deg` stays the image-center bearing and can read 0 while this tilt is still large.
 
 ### docking_distance
 
@@ -202,7 +214,7 @@ Voltage increase, in volts, that counts as charging. Used only when `power_senso
 
 Exponential smoothing weight for the detected pose, from 0 to 1. Higher values trust the latest detection more.
 
-`status` reports `is_running`, `is_docked`, `state` (`idle`, `searching`, `approaching`, `waiting_charge`, `docked`, `failed`), `retry_count`, `bearing_deg`, and `relative_size`.
+`status` reports `is_running`, `is_docked`, `state` (`idle`, `searching`, `approaching`, `waiting_charge`, `docked`, `failed`), `retry_count`, `bearing_deg`, `surface_yaw_deg`, `using_depth`, and `relative_size`.
 
 ## Troubleshooting
 

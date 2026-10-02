@@ -1,14 +1,16 @@
 import asyncio
 import math
 import time
+from array import array
 from dataclasses import dataclass
-from typing import Any, ClassVar, Mapping, Optional, Sequence, Tuple, cast
+from typing import Any, ClassVar, List, Mapping, Optional, Sequence, Tuple, cast
 
 from typing_extensions import Self
 from viam.components.base import Base
 from viam.components.camera import Camera
 from viam.components.power_sensor import PowerSensor
 from viam.logging import getLogger
+from viam.media.video import CameraMimeType
 from viam.module.types import Reconfigurable
 from viam.proto.app.robot import ComponentConfig
 from viam.proto.common import ResourceName, Vector3
@@ -73,6 +75,125 @@ def smooth_velocity(
     return v, w
 
 
+def _raw_depth(image) -> Optional[Tuple[array, int, int]]:
+    """Decode an image/vnd.viam.dep frame into millimeters, row-major."""
+    if image.mime_type != CameraMimeType.VIAM_RAW_DEPTH:
+        return None
+    data = image.data
+    if len(data) < 24:
+        return None
+    width = int.from_bytes(data[8:16], "big")
+    height = int.from_bytes(data[16:24], "big")
+    if width <= 0 or height <= 0:
+        return None
+    payload = data[24 : 24 + width * height * 2]
+    if len(payload) < width * height * 2:
+        return None
+    depths = array("H")
+    depths.frombytes(payload)
+    depths.byteswap()
+    return depths, width, height
+
+
+def _depth_strip(depths: array, width: int, height: int, x0: int, x1: int, y0: int, y1: int) -> List[int]:
+    values: List[int] = []
+    x0 = max(0, x0)
+    x1 = min(width, x1)
+    y0 = max(0, y0)
+    y1 = min(height, y1)
+    for y in range(y0, y1):
+        row = y * width
+        for x in range(x0, x1):
+            depth = depths[row + x]
+            if 0 < depth < 10000:
+                values.append(depth)
+    return values
+
+
+def surface_yaw_rad(
+    depth_image,
+    x_min: float,
+    y_min: float,
+    x_max: float,
+    y_max: float,
+    color_width: int,
+    color_height: int,
+    fov_deg: float,
+) -> Optional[float]:
+    """Yaw, in radians, to become perpendicular to the surface inside the detection.
+
+    Positive means turn left. A centered detection can still be oblique; depth on
+    the left and right of the box exposes that tilt. Returns None when the frame
+    is not depth or there are not enough valid samples.
+    """
+    decoded = _raw_depth(depth_image)
+    if decoded is None or color_width <= 0 or color_height <= 0:
+        return None
+    depths, depth_width, depth_height = decoded
+    scale_x = depth_width / color_width
+    scale_y = depth_height / color_height
+    left = int(x_min * scale_x)
+    right = int(x_max * scale_x)
+    top = int(y_min * scale_y)
+    bottom = int(y_max * scale_y)
+    span = right - left
+    band = bottom - top
+    if span < 6 or band < 2:
+        return None
+
+    mid_top = top + band // 4
+    mid_bottom = bottom - band // 4
+    if mid_bottom <= mid_top:
+        mid_top, mid_bottom = top, bottom
+    quarter = max(span // 4, 1)
+    left_depths = _depth_strip(depths, depth_width, depth_height, left, left + quarter, mid_top, mid_bottom)
+    right_depths = _depth_strip(depths, depth_width, depth_height, right - quarter, right, mid_top, mid_bottom)
+    if len(left_depths) < 5 or len(right_depths) < 5:
+        return None
+
+    left_depth = _median(left_depths)
+    right_depth = _median(right_depths)
+    mean_depth = (left_depth + right_depth) / 2.0
+    fov = math.radians(fov_deg)
+
+    def camera_x(pixel: float) -> float:
+        bearing = ((pixel / depth_width) - 0.5) * fov
+        return mean_depth * math.tan(bearing)
+
+    baseline = camera_x(right - quarter / 2.0) - camera_x(left + quarter / 2.0)
+    if baseline <= 1.0:
+        return None
+    # Right side farther means the surface faces to the right, so yaw right.
+    return math.atan2(left_depth - right_depth, baseline)
+
+
+def _median(values: List[int]) -> float:
+    ordered = sorted(values)
+    mid = len(ordered) // 2
+    if len(ordered) % 2:
+        return float(ordered[mid])
+    return (ordered[mid - 1] + ordered[mid]) / 2.0
+
+
+def _color_and_depth(images):
+    color = None
+    depth = None
+    for image in images:
+        if image.mime_type == CameraMimeType.VIAM_RAW_DEPTH:
+            if depth is None:
+                depth = image
+        elif image.mime_type != CameraMimeType.PCD and color is None:
+            color = image
+    return color, depth
+
+
+@dataclass
+class Sighting:
+    center_offset: float
+    relative_size: float
+    surface_yaw: Optional[float]
+
+
 @dataclass
 class Status:
     is_running: bool = False
@@ -81,12 +202,15 @@ class Status:
     retry_count: int = 0
     bearing_deg: float = 0.0
     relative_size: float = 0.0
+    surface_yaw_deg: float = 0.0
+    using_depth: bool = False
 
 
 class detectionDock(Action, Reconfigurable):
     MODEL: ClassVar[Model] = Model(ModelFamily("viam-labs", "dock"), "detection-dock")
 
     power_sensor: Optional[PowerSensor]
+    depth_camera: Optional[Camera]
     base: Base
     camera: Camera
     detector: VisionClient
@@ -97,6 +221,7 @@ class detectionDock(Action, Reconfigurable):
         my_class = cls(config.name)
         my_class.internal_status = Status()
         my_class.power_sensor = None
+        my_class.depth_camera = None
         my_class.reconfigure(config, dependencies)
         return my_class
 
@@ -113,8 +238,11 @@ class detectionDock(Action, Reconfigurable):
         base = required("base")
         camera = required("camera")
         detector = required("detector")
-        power_sensor = fields["power_sensor"].string_value if "power_sensor" in fields else ""
-        optional = [power_sensor] if power_sensor else []
+        optional = []
+        for name in ("power_sensor", "depth_camera"):
+            value = fields[name].string_value if name in fields else ""
+            if value:
+                optional.append(value)
         return [base, camera, detector], optional
 
     def reconfigure(self, config: ComponentConfig, dependencies: Mapping[ResourceName, ResourceBase]):
@@ -141,10 +269,20 @@ class detectionDock(Action, Reconfigurable):
                     power_sensor,
                 )
 
+        depth_camera = fields["depth_camera"].string_value if "depth_camera" in fields else ""
+        self.depth_camera = None
+        if depth_camera:
+            depth_name = Camera.get_resource_name(depth_camera)
+            if depth_name in dependencies:
+                self.depth_camera = cast(Camera, dependencies[depth_name])
+            else:
+                LOGGER.warning("depth_camera %s is not available; docking will use image bearing only", depth_camera)
+
         self.detection_class = _string(fields, "detection_class", "match")
         self.camera_fov_deg = _number(fields, "camera_fov_deg", 70.0)
         self.close_percent = _number(fields, "close_percent", 0.45)
         self.center_tolerance = _number(fields, "center_tolerance", 0.05)
+        self.surface_yaw_tolerance = math.radians(_number(fields, "surface_yaw_tolerance_deg", 5.0))
         self.docking_distance = _number(fields, "docking_distance", 0.30)
 
         self.k_phi = _number(fields, "k_phi", 3.0)
@@ -176,6 +314,8 @@ class detectionDock(Action, Reconfigurable):
         self.internal_status.is_running = True
         self.internal_status.is_docked = False
         self.internal_status.retry_count = 0
+        self.internal_status.using_depth = False
+        self.internal_status.surface_yaw_deg = 0.0
         self.internal_status.state = "searching"
 
         try:
@@ -242,6 +382,7 @@ class detectionDock(Action, Reconfigurable):
         last_seen = time.monotonic()
         filtered_center: Optional[float] = None
         filtered_size: Optional[float] = None
+        filtered_yaw: Optional[float] = None
 
         while self.internal_status.is_running and time.monotonic() < deadline:
             loop_start = time.monotonic()
@@ -253,7 +394,8 @@ class detectionDock(Action, Reconfigurable):
                     return False
             else:
                 last_seen = time.monotonic()
-                center_offset, relative_size = sample
+                center_offset = sample.center_offset
+                relative_size = sample.relative_size
                 if filtered_center is None or filtered_size is None:
                     filtered_center, filtered_size = center_offset, relative_size
                 else:
@@ -261,16 +403,29 @@ class detectionDock(Action, Reconfigurable):
                     filtered_center = (1.0 - coef) * filtered_center + coef * center_offset
                     filtered_size = (1.0 - coef) * filtered_size + coef * relative_size
 
+                if sample.surface_yaw is not None:
+                    if not self.internal_status.using_depth:
+                        LOGGER.info("aligning to the dock surface with depth")
+                    self.internal_status.using_depth = True
+                    if filtered_yaw is None:
+                        filtered_yaw = sample.surface_yaw
+                    else:
+                        filtered_yaw = _wrap(filtered_yaw + self.filter_coef * _wrap(sample.surface_yaw - filtered_yaw))
+                    self.internal_status.surface_yaw_deg = math.degrees(filtered_yaw)
+
                 psi = -filtered_center * math.radians(self.camera_fov_deg)
                 distance = self.docking_distance * (self.close_percent / max(filtered_size, 1e-3))
                 self.internal_status.bearing_deg = math.degrees(psi)
                 self.internal_status.relative_size = filtered_size
 
-                if filtered_size >= self.close_percent and abs(filtered_center) <= self.center_tolerance:
+                squared = filtered_yaw is None or abs(filtered_yaw) <= self.surface_yaw_tolerance
+                if filtered_size >= self.close_percent and abs(filtered_center) <= self.center_tolerance and squared:
                     await self.base.stop()
                     return True
 
-                linear, angular = self._approach_velocity(psi, distance)
+                # The graceful controller's goal yaw is opposite the usual left-positive heading.
+                goal_yaw = -filtered_yaw if filtered_yaw is not None else psi
+                linear, angular = self._approach_velocity(psi, distance, goal_yaw)
                 await self._command(linear, angular)
 
             elapsed = time.monotonic() - loop_start
@@ -279,9 +434,9 @@ class detectionDock(Action, Reconfigurable):
         await self.base.stop()
         return False
 
-    def _approach_velocity(self, psi: float, distance: float) -> Tuple[float, float]:
+    def _approach_velocity(self, psi: float, distance: float, goal_yaw: float) -> Tuple[float, float]:
         goal_dist = max(distance - self.docking_distance, 1e-3)
-        r, phi, delta = ego_polar(goal_dist * math.cos(psi), goal_dist * math.sin(psi), psi)
+        r, phi, delta = ego_polar(goal_dist * math.cos(psi), goal_dist * math.sin(psi), goal_yaw)
         return smooth_velocity(
             r,
             phi,
@@ -297,16 +452,23 @@ class detectionDock(Action, Reconfigurable):
             v_angular_max=self.v_angular_max,
         )
 
-    async def _detect(self) -> Optional[Tuple[float, float]]:
+    async def _detect(self) -> Optional[Sighting]:
         images, _ = await self.camera.get_images()
         if not images:
             return None
-        image = images[0]
-        width = image.width or 0
-        if width <= 0:
+        color, depth = _color_and_depth(images)
+        if color is None:
+            return None
+        width = color.width or 0
+        height = color.height or 0
+        if width <= 0 or height <= 0:
             return None
 
-        detections = await self.detector.get_detections(image)
+        if depth is None and self.depth_camera is not None:
+            depth_images, _ = await self.depth_camera.get_images()
+            _, depth = _color_and_depth(depth_images)
+
+        detections = await self.detector.get_detections(color)
         matches = [det for det in detections if not self.detection_class or det.class_name == self.detection_class]
         if not matches:
             return None
@@ -314,7 +476,19 @@ class detectionDock(Action, Reconfigurable):
         best = max(matches, key=lambda det: (det.x_max - det.x_min) * (det.y_max - det.y_min))
         center_offset = ((best.x_min + best.x_max) / 2.0) / width - 0.5
         relative_size = (best.x_max - best.x_min) / width
-        return center_offset, relative_size
+        surface_yaw = None
+        if depth is not None:
+            surface_yaw = surface_yaw_rad(
+                depth,
+                best.x_min,
+                best.y_min,
+                best.x_max,
+                best.y_max,
+                width,
+                height,
+                self.camera_fov_deg,
+            )
+        return Sighting(center_offset, relative_size, surface_yaw)
 
     async def _wait_for_charge(self) -> bool:
         if self.power_sensor is None:
@@ -363,6 +537,8 @@ class detectionDock(Action, Reconfigurable):
             "state": status.state,
             "retry_count": status.retry_count,
             "bearing_deg": status.bearing_deg,
+            "surface_yaw_deg": status.surface_yaw_deg,
+            "using_depth": status.using_depth,
             "relative_size": status.relative_size,
         }
 
