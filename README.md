@@ -7,7 +7,7 @@ The model this module makes available is viam-labs:dock:detection-dock
 Docking follows the same stages as the [Nav2 docking server](https://docs.nav2.org/rolling/tutorials/general_tutorials/using_docking/): find the dock, then run a vision-control loop that continuously refines the target while driving toward it. The approach uses Nav2's graceful control law (bearing and range estimated from the detection). There is no map or staging navigation — if the dock is not in view, the base spins until the detector sees it.
 
 1. Spin until the detector sees `detection_class`, or until the base has turned `search_spin_deg` (default two full rotations).
-2. Enter the vision-control loop. Each cycle, estimate bearing from where the detection sits in the image and range from how large it is, filter that pose, and command a smooth velocity toward it. If a depth image is available, also measure the tilt of the surface inside the detection and steer until the robot is square to that surface. Within about 8 inches of the dock, the turn is limited to `align_nudge_deg` so the base does not whip back and forth. Forward speed is unchanged.
+2. Enter the vision-control loop. Each cycle, estimate bearing from where the detection sits in the image and range from how large it is, filter that pose, and command a smooth velocity toward it. If a depth image is available, also measure the tilt of the surface inside the detection and steer until the robot is square to that surface.
 3. Leave the loop once the detection is centered within `center_tolerance` and at least `close_percent` of the image wide. With depth, the surface also has to be within `surface_yaw_tolerance_deg` of straight on. A centered detection can still be tilted, which makes the target look smaller than it does when the robot is square.
 4. If `power_sensor` is set, wait up to `wait_charge_timeout` for the voltage to rise by `charge_voltage_delta`. If it does not, back up and retry, up to `max_retries`. If `power_sensor` is omitted, reaching the target is success.
 
@@ -118,18 +118,6 @@ How many degrees the dock surface may tilt, left versus right in the depth image
 
 Meters. Range is estimated from detection size so that a detection of width `close_percent` is this far away. This scales the approach controller; it is not a measured distance.
 
-### align_distance
-
-*float (default: 0.20)*
-
-Meters, about 8 inches. Inside this distance the approach still drives forward, but the turn is limited to `align_nudge_deg` instead of `v_angular_max`.
-
-### align_nudge_deg
-
-*float (default: 6)*
-
-Maximum turn rate, in deg/s, while still within `align_distance` of the dock. The command also slews toward that rate so it cannot snap from a left turn to a right turn in one cycle.
-
 ### k_phi, k_delta, beta, lambda
 
 *float (defaults: 3.0, 2.0, 0.4, 2.0)*
@@ -206,7 +194,7 @@ Extra attempts after the first. A failed approach backs up by `backup_distance_m
 
 *integer (default: 300)*
 
-How far to reverse, in millimeters, before a retry. Driven with the approach velocity, not `move_straight`.
+How far to reverse, in millimeters, before a retry.
 
 ### wait_charge_timeout
 
@@ -226,7 +214,7 @@ Voltage increase, in volts, that counts as charging. Used only when `power_senso
 
 Exponential smoothing weight for the detected pose, from 0 to 1. Higher values trust the latest detection more.
 
-`status` reports `is_running`, `is_docked`, `state` (`idle`, `searching`, `approaching`, `backing_up`, `waiting_charge`, `docked`, `failed`), `retry_count`, `bearing_deg`, `surface_yaw_deg`, `using_depth`, and `relative_size`. `retry_count` is the attempt index, starting at 0, so 3 is the last try when `max_retries` is 3.
+`status` reports `is_running`, `is_docked`, `state` (`idle`, `searching`, `approaching`, `waiting_charge`, `docked`, `failed`), `retry_count`, `bearing_deg`, `surface_yaw_deg`, `using_depth`, and `relative_size`.
 
 ## Troubleshooting
 

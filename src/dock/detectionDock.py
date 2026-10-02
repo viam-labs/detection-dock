@@ -284,11 +284,6 @@ class detectionDock(Action, Reconfigurable):
         self.center_tolerance = _number(fields, "center_tolerance", 0.05)
         self.surface_yaw_tolerance = math.radians(_number(fields, "surface_yaw_tolerance_deg", 5.0))
         self.docking_distance = _number(fields, "docking_distance", 0.30)
-        self.align_distance = _number(fields, "align_distance", 0.20)
-        # Close in, curvature saturates and a fast turn swings past the dock.
-        # This caps that turn. It is not added on top of the approach command.
-        self.align_nudge = math.radians(_number(fields, "align_nudge_deg", 6.0))
-        self.align_slew = math.radians(20.0)
 
         self.k_phi = _number(fields, "k_phi", 3.0)
         self.k_delta = _number(fields, "k_delta", 2.0)
@@ -388,15 +383,14 @@ class detectionDock(Action, Reconfigurable):
         filtered_center: Optional[float] = None
         filtered_size: Optional[float] = None
         filtered_yaw: Optional[float] = None
-        commanded_angular = 0.0
 
         while self.internal_status.is_running and time.monotonic() < deadline:
             loop_start = time.monotonic()
             sample = await self._detect()
             if sample is None:
-                await self.base.stop()
                 if time.monotonic() - last_seen > self.external_detection_timeout:
                     LOGGER.info("lost dock detection")
+                    await self.base.stop()
                     return False
             else:
                 last_seen = time.monotonic()
@@ -430,17 +424,8 @@ class detectionDock(Action, Reconfigurable):
                     return True
 
                 # The graceful controller's goal yaw is opposite the usual left-positive heading.
-                # Within align_distance the curvature term saturates at v_angular_max, which
-                # whips the base back and forth. Keep the approach speed and only allow a slow turn.
-                self.internal_status.state = "approaching"
                 goal_yaw = -filtered_yaw if filtered_yaw is not None else psi
                 linear, angular = self._approach_velocity(psi, distance, goal_yaw)
-                remaining = distance - self.docking_distance
-                if remaining <= self.align_distance:
-                    angular = max(-self.align_nudge, min(self.align_nudge, angular))
-                    step = self.align_slew / self.controller_frequency
-                    angular = commanded_angular + max(-step, min(step, angular - commanded_angular))
-                commanded_angular = angular
                 await self._command(linear, angular)
 
             elapsed = time.monotonic() - loop_start
@@ -518,27 +503,9 @@ class detectionDock(Action, Reconfigurable):
         return False
 
     async def _backup(self):
-        if not self.internal_status.is_running or self.backup_distance_mm <= 0:
+        if not self.internal_status.is_running:
             return
-        # move_straight returns without moving on this base, so the retry
-        # counter was climbing with no visible reverse. Use the same velocity
-        # command as the approach.
-        speed = self.v_linear_max
-        if speed <= 0:
-            return
-        self.internal_status.state = "backing_up"
-        duration = (self.backup_distance_mm / 1000.0) / speed
-        LOGGER.info("backing up %s mm before retry", self.backup_distance_mm)
-        try:
-            await self._command(-speed, 0.0)
-            deadline = time.monotonic() + duration
-            while self.internal_status.is_running and time.monotonic() < deadline:
-                await asyncio.sleep(0.05)
-        finally:
-            try:
-                await self.base.stop()
-            except Exception:
-                LOGGER.exception("failed to stop base after backup")
+        await self.base.move_straight(-self.backup_distance_mm, int(self.v_linear_max * 1000))
 
     async def _command(self, linear_mps: float, angular_radps: float):
         await self.base.set_velocity(
