@@ -8,7 +8,7 @@ from action_python import Action
 from .detectionDock import detectionDock
 
 Registry.register_resource_creator(
-    Action.SUBTYPE,
+    Action.API,
     detectionDock.MODEL,
     ResourceCreatorRegistration(detectionDock.new, detectionDock.validate),
 )

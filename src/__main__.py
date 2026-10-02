@@ -9,7 +9,7 @@ async def main():
     Resources must be pre-registered. For an example, see the `__init__.py` file.
     """
     module = Module.from_args()
-    module.add_model_from_registry(Action.SUBTYPE, detectionDock.MODEL)
+    module.add_model_from_registry(Action.API, detectionDock.MODEL)
     await module.start()
 
 if __name__ == "__main__":
