@@ -6,7 +6,7 @@ The model this module makes available is viam-labs:dock:detection-dock
 
 Docking follows the same stages as the [Nav2 docking server](https://docs.nav2.org/rolling/tutorials/general_tutorials/using_docking/): find the dock, then run a vision-control loop that continuously refines the target while driving toward it. The approach uses Nav2's graceful control law (bearing and range estimated from the detection). There is no map or staging navigation — if the dock is not in view, the base spins until the detector sees it.
 
-1. Spin until the detector sees `detection_class`, or until the base has turned `search_spin_deg` (default two full rotations).
+1. Watch for `detection_class` while holding still for `search_settle` seconds, so a detection already in frame is not spun away. If it is still missing, spin at `search_angular_velocity` until the detector sees it, or until the base has turned `search_spin_deg` (default two full rotations).
 2. Enter the vision-control loop. Each cycle, estimate bearing from where the detection sits in the image and range from how large it is, filter that pose, and command a smooth velocity toward it. If a depth image is available, also measure the tilt of the surface inside the detection and steer until the robot is square to that surface. Inside the slowdown distance the turn is limited to `close_angular_max`. Within about 5 inches, that law is replaced by small moves: creep forward if the detection is still small, creep back if it is already too large, and turn slowly to fix bearing and surface tilt.
 3. Leave the loop once the detection is centered within `center_tolerance` and at least `close_percent` of the image wide. With depth, the surface also has to be within `surface_yaw_tolerance_deg` of straight on. A centered detection can still be tilted, which makes the target look smaller than it does when the robot is square.
 4. If `power_sensor` is set, wait up to `wait_charge_timeout` for the voltage to rise by `charge_voltage_delta`. If it does not, back up and retry, up to `max_retries`. If `power_sensor` is omitted, reaching the target is success.
@@ -144,9 +144,15 @@ Maximum turn rate, in deg/s, once the estimated range is within `slowdown_radius
 
 ### search_angular_velocity
 
-*float (default: 15)*
+*float (default: 10)*
 
-Spin speed while searching for the dock, in deg/s.
+Spin speed while searching for the dock, in deg/s. Used only after `search_settle`.
+
+### search_settle
+
+*float (default: 2)*
+
+Seconds to hold still and keep checking for a detection before the search spin starts.
 
 ### search_spin_deg
 
@@ -176,7 +182,7 @@ Vision-control loop rate, in Hz.
 
 *float (default: 120)*
 
-Safety limit, in seconds, for the search. The search normally ends at `search_spin_deg` first. At the default 15 deg/s, 720 degrees takes about 48 seconds.
+Safety limit, in seconds, for the search. The search normally ends at `search_spin_deg` first. At the default 10 deg/s, 720 degrees takes about 72 seconds, plus the 2 second settle.
 
 ### dock_approach_timeout
 

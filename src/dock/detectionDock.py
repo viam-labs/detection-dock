@@ -301,8 +301,9 @@ class detectionDock(Action, Reconfigurable):
         self.close_angular_slew = math.radians(30.0)
         self.micro_distance = 0.12
         self.micro_linear = min(self.v_linear_min, 0.04)
-        self.search_angular_velocity = math.radians(_number(fields, "search_angular_velocity", 15.0))
+        self.search_angular_velocity = math.radians(_number(fields, "search_angular_velocity", 10.0))
         self.search_spin_deg = _number(fields, "search_spin_deg", 720.0)
+        self.search_settle = _number(fields, "search_settle", 2.0)
 
         self.controller_frequency = _number(fields, "controller_frequency", 8.0)
         self.initial_perception_timeout = _number(fields, "initial_perception_timeout", 120.0)
@@ -366,6 +367,8 @@ class detectionDock(Action, Reconfigurable):
 
     async def _acquire(self) -> bool:
         self.internal_status.state = "searching"
+        await self.base.stop()
+        settle_until = time.monotonic() + self.search_settle
         speed_deg = abs(math.degrees(self.search_angular_velocity))
         started_spin = None
         deadline = time.monotonic() + self.initial_perception_timeout
@@ -376,6 +379,9 @@ class detectionDock(Action, Reconfigurable):
             if sample is not None:
                 await self.base.stop()
                 return True
+            if time.monotonic() < settle_until:
+                await asyncio.sleep(1.0 / self.controller_frequency)
+                continue
             if started_spin is None:
                 started_spin = time.monotonic()
             await self._command(0.0, self.search_angular_velocity)
