@@ -7,7 +7,7 @@ The model this module makes available is viam-labs:dock:detection-dock
 Docking follows the same stages as the [Nav2 docking server](https://docs.nav2.org/rolling/tutorials/general_tutorials/using_docking/): find the dock, then run a vision-control loop that continuously refines the target while driving toward it. The approach uses Nav2's graceful control law (bearing and range estimated from the detection). There is no map or staging navigation — if the dock is not in view, the base spins until the detector sees it.
 
 1. Spin until the detector sees `detection_class`, or until the base has turned `search_spin_deg` (default two full rotations).
-2. Enter the vision-control loop. Each cycle, estimate bearing from where the detection sits in the image and range from how large it is, filter that pose, and drive toward it. If a depth image is available, also measure the tilt of the surface inside the detection. While still `align_distance` (default about 6 inches) short of the dock, the robot turns harder so most of the alignment happens before it is too close to spin. It keeps moving forward.
+2. Enter the vision-control loop. Each cycle, estimate bearing from where the detection sits in the image and range from how large it is, filter that pose, and command a smooth velocity toward it. If a depth image is available, also measure the tilt of the surface inside the detection and steer until the robot is square to that surface. In the last few inches before the dock, and not in the final two inches, a small extra turn (at most `align_nudge_deg`) is added. It does not slow or replace the approach.
 3. Leave the loop once the detection is centered within `center_tolerance` and at least `close_percent` of the image wide. With depth, the surface also has to be within `surface_yaw_tolerance_deg` of straight on. A centered detection can still be tilted, which makes the target look smaller than it does when the robot is square.
 4. If `power_sensor` is set, wait up to `wait_charge_timeout` for the voltage to rise by `charge_voltage_delta`. If it does not, back up and retry, up to `max_retries`. If `power_sensor` is omitted, reaching the target is success.
 
@@ -122,13 +122,13 @@ Meters. Range is estimated from detection size so that a detection of width `clo
 
 *float (default: 0.15)*
 
-Meters, about 6 inches. While the estimated range is still farther than the dock by this much, heading error produces a stronger turn and a slower approach. The robot does not reverse to align.
+Meters, about 6 inches. Extra heading nudge applies only while the estimated range is still this far short of the dock, and already closer than about 2 inches is left out so obstacle avoidance is not asked to spin at contact.
 
-### align_gain
+### align_nudge_deg
 
-*float (default: 2.0)*
+*float (default: 10)*
 
-How hard to turn, in rad/s per radian of heading error, during that early alignment.
+Maximum extra turn, in deg/s, during that short window. The approach velocity is otherwise unchanged.
 
 ### k_phi, k_delta, beta, lambda
 
@@ -226,7 +226,7 @@ Voltage increase, in volts, that counts as charging. Used only when `power_senso
 
 Exponential smoothing weight for the detected pose, from 0 to 1. Higher values trust the latest detection more.
 
-`status` reports `is_running`, `is_docked`, `state` (`idle`, `searching`, `aligning`, `approaching`, `waiting_charge`, `docked`, `failed`), `retry_count`, `bearing_deg`, `surface_yaw_deg`, `using_depth`, and `relative_size`.
+`status` reports `is_running`, `is_docked`, `state` (`idle`, `searching`, `approaching`, `waiting_charge`, `docked`, `failed`), `retry_count`, `bearing_deg`, `surface_yaw_deg`, `using_depth`, and `relative_size`.
 
 ## Troubleshooting
 

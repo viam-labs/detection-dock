@@ -285,7 +285,7 @@ class detectionDock(Action, Reconfigurable):
         self.surface_yaw_tolerance = math.radians(_number(fields, "surface_yaw_tolerance_deg", 5.0))
         self.docking_distance = _number(fields, "docking_distance", 0.30)
         self.align_distance = _number(fields, "align_distance", 0.15)
-        self.align_gain = _number(fields, "align_gain", 2.0)
+        self.align_nudge = math.radians(_number(fields, "align_nudge_deg", 10.0))
 
         self.k_phi = _number(fields, "k_phi", 3.0)
         self.k_delta = _number(fields, "k_delta", 2.0)
@@ -425,21 +425,17 @@ class detectionDock(Action, Reconfigurable):
                     await self.base.stop()
                     return True
 
-                # Keep driving in. A few inches before the dock, turn harder so the
-                # heading is mostly done before obstacle avoidance blocks a spin.
+                # Same approach as before the 0.3.5 alignment takeover. A few inches
+                # short of the dock, add a small turn. It does not replace the drive.
                 # The graceful controller's goal yaw is opposite the usual left-positive heading.
+                self.internal_status.state = "approaching"
                 goal_yaw = -filtered_yaw if filtered_yaw is not None else psi
                 linear, angular = self._approach_velocity(psi, distance, goal_yaw)
-                error = psi if filtered_yaw is None else _wrap(filtered_yaw + psi)
-                if distance > self.docking_distance + self.align_distance and abs(error) > 0.08:
-                    self.internal_status.state = "aligning"
-                    angular = max(-self.v_angular_max, min(self.v_angular_max, error * self.align_gain))
-                    slow = min(abs(error) / 0.7, 0.6)
-                    linear = max(self.v_linear_min * 0.5, abs(linear) * (1.0 - slow))
-                else:
-                    self.internal_status.state = "approaching"
-                    if filtered_size >= self.close_percent * 0.85:
-                        angular *= 0.25
+                remaining = distance - self.docking_distance
+                if 0.05 < remaining <= self.align_distance:
+                    error = filtered_yaw if filtered_yaw is not None else psi
+                    extra = max(-self.align_nudge, min(self.align_nudge, error))
+                    angular = max(-self.v_angular_max, min(self.v_angular_max, angular + extra))
                 await self._command(linear, angular)
 
             elapsed = time.monotonic() - loop_start
