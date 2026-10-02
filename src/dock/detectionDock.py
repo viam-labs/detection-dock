@@ -518,9 +518,27 @@ class detectionDock(Action, Reconfigurable):
         return False
 
     async def _backup(self):
-        if not self.internal_status.is_running:
+        if not self.internal_status.is_running or self.backup_distance_mm <= 0:
             return
-        await self.base.move_straight(-self.backup_distance_mm, int(self.v_linear_max * 1000))
+        # move_straight returns without moving on this base, so the retry
+        # counter was climbing with no visible reverse. Use the same velocity
+        # command as the approach.
+        speed = self.v_linear_max
+        if speed <= 0:
+            return
+        self.internal_status.state = "backing_up"
+        duration = (self.backup_distance_mm / 1000.0) / speed
+        LOGGER.info("backing up %s mm before retry", self.backup_distance_mm)
+        try:
+            await self._command(-speed, 0.0)
+            deadline = time.monotonic() + duration
+            while self.internal_status.is_running and time.monotonic() < deadline:
+                await asyncio.sleep(0.05)
+        finally:
+            try:
+                await self.base.stop()
+            except Exception:
+                LOGGER.exception("failed to stop base after backup")
 
     async def _command(self, linear_mps: float, angular_radps: float):
         await self.base.set_velocity(
