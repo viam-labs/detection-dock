@@ -4,13 +4,12 @@
 
 The model this module makes available is viam-labs:dock:detection-dock
 
-This service performs the following routine in attempts to "dock" a mobile robot:
+Docking follows the same stages as the [Nav2 docking server](https://docs.nav2.org/rolling/tutorials/general_tutorials/using_docking/): find the dock, then run a vision-control loop that continuously refines the target while driving toward it. The approach uses Nav2's graceful control law (bearing and range estimated from the detection). There is no map or staging navigation — if the dock is not in view, the base spins until the detector sees it.
 
-1. Use a vision detector to detect if the selected class is found
-2. If found, attempt to center detection within view by rotating left or right - then move forward
-3. If detection takes up more than configured percent of the image, try docking by moving forward and wiggling back and forth, then seeing if the voltage increased.  If not, back up and go back to step 1.  If so, consider docked.
-4. If not found, rotate counterclockwise
-5. Go back to step 1
+1. Spin until the detector sees `detection_class`, or until `initial_perception_timeout`.
+2. Enter the vision-control loop. Each cycle, estimate bearing from where the detection sits in the image and range from how large it is, filter that pose, and command a smooth velocity toward it.
+3. Leave the loop once the detection is centered within `center_tolerance` and at least `close_percent` of the image wide.
+4. If `power_sensor` is set, wait up to `wait_charge_timeout` for the voltage to rise by `charge_voltage_delta`. If it does not, back up and retry, up to `max_retries`. If `power_sensor` is omitted, reaching the target is success.
 
 This has been tested with [feature match detection](https://github.com/viam-labs/feature-match-detector) configured as a vision detector, but other detector types should work, as well.
 For docking with the feature match detector, we used the following image, but you can use others:
@@ -26,7 +25,7 @@ sudo apt-get install python3
 sudo apt install python3-pip python3-venv git
 ```
 
-You must also have configured a [base component](https://docs.viam.com/components/base/), [vision service detector](https://docs.viam.com/services/vision/detection/), and a [power sensor](https://docs.viam.com/components/power-sensor/)
+You must also have configured a [base component](https://docs.viam.com/components/base/) and a [vision service detector](https://docs.viam.com/services/vision/detection/). A [power sensor](https://docs.viam.com/components/power-sensor/) is optional and is only used to confirm that charging started.
 
 ## API
 
@@ -38,11 +37,10 @@ Please use the API codebase to interact with a configured version of this servic
 
 The following attributes may be configured as detection dock service config attributes.
 
-For example: the following configuration would use "my_camera" to get an image to pass to "my_dock_feature_detector",  and move base "my_base" to a detected "match", and then ensure docked by detecting a change in voltage with "my_power_sensor".
+For example: the following configuration uses "my_camera" and "my_dock_feature_detector" to find a "match", and drives "my_base" to it. Reaching that target is success. Add `power_sensor` only if a voltage rise should confirm charging.
 
 ```json
 {
-    "power_sensor": "my_power_sensor",
     "base": "my_base",
     "camera": "my_camera",
     "detector": "my_dock_feature_detector",
@@ -50,14 +48,9 @@ For example: the following configuration would use "my_camera" to get an image t
 }
 ```
 
-We used a [Viam Rover](https://www.viam.com/resources/rover) for a base, but other bases can be used - you might need to tweak some of the config settings and test until working fairly reliably.
+`base`, `camera`, and `detector` are required implicit dependencies. `power_sensor` is optional.
 
-
-### power_sensor
-
-*string (required)*
-
-The name of the configured [power sensor](https://docs.viam.com/components/power-sensor/)
+We used a [Viam Rover](https://www.viam.com/resources/rover) for a base, but other bases can be used. The base must support `SetVelocity`.
 
 ### base
 
@@ -77,65 +70,127 @@ The name of the configured [camera component](https://docs.viam.com/components/c
 
 The name of the configured [vision service detector](https://docs.viam.com/services/vision/detection/)
 
+### power_sensor
+
+*string (optional)*
+
+The name of a configured [power sensor](https://docs.viam.com/components/power-sensor/). When set, docking succeeds only if voltage rises by `charge_voltage_delta` after the visual approach. When omitted, the visual approach alone is success.
+
 ### detection_class
 
 *string (default: "match")*
 
-The name of detection class(label) to be matched.
+Detection class label to track. If several match, the largest box is used.
 
-### spin_velocity
+### camera_fov_deg
 
-*integer (default: 800)*
+*float (default: 70)*
 
-velocity in degs/second when spinning
-
-### straight_velocity
-
-*integer (default: 350)*
-
-velocity in degs/second when moving straight
-
-### search_spin_deg
-
-*integer (default: 4)*
-
-degrees to spin when searching for detection
-
-### straight_distance
-
-*integer (default: 50)*
-
-how far to move after centered on detection
-
-### center_tolerance
-
-*float (default: .05)*
-
-Tolerance within the center of the detection is within the center of the image frame (.05 is 5 percent)
-
-### detection_try_max
-
-*integer (default: 4)*
-
-Try up to this many times for a detection before search spinning
+Horizontal camera field of view, in degrees. Used to turn the detection's horizontal offset into a bearing.
 
 ### close_percent
 
-*float (default: .45)*
+*float (default: 0.45)*
 
-What percent of the frame should the detection be before final docking sequence (.45 is 45 percent)
+Detection width, as a fraction of the image, that counts as having reached the dock.
 
-### max_search_tries
+### center_tolerance
 
-*integer (default: 100)*
+*float (default: 0.05)*
 
-Max times to spin searching without seeing a detection before giving up
+How far the detection center may sit from the image center, as a fraction of image width, and still count as aligned. `0.05` is 5 percent.
 
-### max_dock_tries
+### docking_distance
 
-*integer (default: 10)*
+*float (default: 0.30)*
 
-Max times to try final docking routine before giving up
+Meters. Range is estimated from detection size so that a detection of width `close_percent` is this far away. This scales the approach controller; it is not a measured distance.
+
+### k_phi, k_delta, beta, lambda
+
+*float (defaults: 3.0, 2.0, 0.4, 2.0)*
+
+Gains for the Nav2 graceful control law. `k_phi` pulls the heading onto the line of sight. `k_delta` pulls the robot onto the target heading. `beta` and `lambda` slow the robot when curvature is high.
+
+### v_linear_min, v_linear_max
+
+*float (defaults: 80, 150)*
+
+Approach speed limits, in mm/s.
+
+### v_angular_max
+
+*float (default: 45)*
+
+Maximum angular speed, in deg/s. Also used while searching for the dock.
+
+### slowdown_radius
+
+*float (default: 0.25)*
+
+Meters. Linear speed scales down inside this distance to the approach goal.
+
+### deceleration_max
+
+*float (default: 1.0)*
+
+Maximum deceleration, in m/s², used to limit approach speed.
+
+### controller_frequency
+
+*float (default: 8)*
+
+Vision-control loop rate, in Hz.
+
+### initial_perception_timeout
+
+*float (default: 15)*
+
+Seconds to search for the dock before failing.
+
+### dock_approach_timeout
+
+*float (default: 30)*
+
+Seconds allowed for one approach.
+
+### external_detection_timeout
+
+*float (default: 1.0)*
+
+Seconds the dock may leave the image during an approach before that attempt fails.
+
+### max_retries
+
+*integer (default: 3)*
+
+Extra attempts after the first. A failed approach backs up by `backup_distance_mm` and tries again.
+
+### backup_distance_mm
+
+*integer (default: 300)*
+
+How far to reverse, in millimeters, before a retry.
+
+### wait_charge_timeout
+
+*float (default: 5)*
+
+Seconds to wait for a voltage rise after the visual approach. Used only when `power_sensor` is set.
+
+### charge_voltage_delta
+
+*float (default: 0.12)*
+
+Voltage increase, in volts, that counts as charging. Used only when `power_sensor` is set.
+
+### filter_coef
+
+*float (default: 0.45)*
+
+Exponential smoothing weight for the detected pose, from 0 to 1. Higher values trust the latest detection more.
+
+`status` reports `is_running`, `is_docked`, `state` (`idle`, `searching`, `approaching`, `waiting_charge`, `docked`, `failed`), `retry_count`, `bearing_deg`, and `relative_size`.
 
 ## Troubleshooting
 
