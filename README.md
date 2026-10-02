@@ -200,7 +200,7 @@ Extra attempts after the first. A failed approach backs up by `backup_distance_m
 
 *integer (default: 300)*
 
-How far to reverse, in millimeters, before a retry.
+How far to reverse, in millimeters, before a retry. Driven by holding the approach speed backward for that distance. `move_straight` stops short near the dock.
 
 ### wait_charge_timeout
 
@@ -220,7 +220,7 @@ Voltage increase, in volts, that counts as charging. Used only when `power_senso
 
 Exponential smoothing weight for the detected pose, from 0 to 1. Higher values trust the latest detection more.
 
-`status` reports `is_running`, `is_docked`, `state` (`idle`, `searching`, `approaching`, `waiting_charge`, `docked`, `failed`), `retry_count`, `bearing_deg`, `surface_yaw_deg`, `using_depth`, and `relative_size`.
+`status` reports `is_running`, `is_docked`, `state` (`idle`, `searching`, `approaching`, `backing_up`, `waiting_charge`, `docked`, `failed`), `retry_count`, `bearing_deg`, `surface_yaw_deg`, `using_depth`, and `relative_size`.
 
 ## Troubleshooting
 
