@@ -294,6 +294,10 @@ class detectionDock(Action, Reconfigurable):
         self.v_linear_min = _number(fields, "v_linear_min", 80.0) / 1000.0
         self.v_linear_max = _number(fields, "v_linear_max", 150.0) / 1000.0
         self.v_angular_max = math.radians(_number(fields, "v_angular_max", 45.0))
+        # Near the dock the curvature term saturates and then reverses, which
+        # is the violent swing. Cap the turn there; do not add a second steering term.
+        self.close_angular_max = math.radians(_number(fields, "close_angular_max", 12.0))
+        self.close_angular_slew = math.radians(30.0)
         self.search_angular_velocity = math.radians(_number(fields, "search_angular_velocity", 15.0))
         self.search_spin_deg = _number(fields, "search_spin_deg", 720.0)
 
@@ -383,6 +387,7 @@ class detectionDock(Action, Reconfigurable):
         filtered_center: Optional[float] = None
         filtered_size: Optional[float] = None
         filtered_yaw: Optional[float] = None
+        commanded_angular = 0.0
 
         while self.internal_status.is_running and time.monotonic() < deadline:
             loop_start = time.monotonic()
@@ -426,6 +431,12 @@ class detectionDock(Action, Reconfigurable):
                 # The graceful controller's goal yaw is opposite the usual left-positive heading.
                 goal_yaw = -filtered_yaw if filtered_yaw is not None else psi
                 linear, angular = self._approach_velocity(psi, distance, goal_yaw)
+                remaining = distance - self.docking_distance
+                if remaining <= max(self.slowdown_radius, 0.15):
+                    angular = max(-self.close_angular_max, min(self.close_angular_max, angular))
+                    step = self.close_angular_slew / max(self.controller_frequency, 1.0)
+                    angular = commanded_angular + max(-step, min(step, angular - commanded_angular))
+                commanded_angular = angular
                 await self._command(linear, angular)
 
             elapsed = time.monotonic() - loop_start
