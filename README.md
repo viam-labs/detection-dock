@@ -174,9 +174,9 @@ Maximum deceleration, in m/s², used to limit approach speed.
 
 ### controller_frequency
 
-*float (default: 8)*
+*float (default: 20)*
 
-Vision-control loop rate, in Hz.
+How often to grab an image and ask the detector, in Hz. `20` is every 50 ms. A slow detector can only run as fast as it returns.
 
 ### initial_perception_timeout
 

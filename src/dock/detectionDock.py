@@ -305,7 +305,7 @@ class detectionDock(Action, Reconfigurable):
         self.search_spin_deg = _number(fields, "search_spin_deg", 720.0)
         self.search_settle = _number(fields, "search_settle", 2.0)
 
-        self.controller_frequency = _number(fields, "controller_frequency", 8.0)
+        self.controller_frequency = _number(fields, "controller_frequency", 20.0)
         self.initial_perception_timeout = _number(fields, "initial_perception_timeout", 120.0)
         self.dock_approach_timeout = _number(fields, "dock_approach_timeout", 30.0)
         self.external_detection_timeout = _number(fields, "external_detection_timeout", 1.0)
@@ -373,19 +373,19 @@ class detectionDock(Action, Reconfigurable):
         started_spin = None
         deadline = time.monotonic() + self.initial_perception_timeout
         while self.internal_status.is_running and time.monotonic() < deadline:
+            loop_start = time.monotonic()
             if started_spin is not None and speed_deg * (time.monotonic() - started_spin) >= self.search_spin_deg:
                 break
             sample = await self._detect()
             if sample is not None:
                 await self.base.stop()
                 return True
-            if time.monotonic() < settle_until:
-                await asyncio.sleep(1.0 / self.controller_frequency)
-                continue
-            if started_spin is None:
-                started_spin = time.monotonic()
-            await self._command(0.0, self.search_angular_velocity)
-            await asyncio.sleep(1.0 / self.controller_frequency)
+            if time.monotonic() >= settle_until:
+                if started_spin is None:
+                    started_spin = time.monotonic()
+                await self._command(0.0, self.search_angular_velocity)
+            elapsed = time.monotonic() - loop_start
+            await asyncio.sleep(max(0.0, (1.0 / self.controller_frequency) - elapsed))
         await self.base.stop()
         return False
 
