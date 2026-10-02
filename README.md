@@ -6,7 +6,7 @@ The model this module makes available is viam-labs:dock:detection-dock
 
 Docking follows the same stages as the [Nav2 docking server](https://docs.nav2.org/rolling/tutorials/general_tutorials/using_docking/): find the dock, then run a vision-control loop that continuously refines the target while driving toward it. The approach uses Nav2's graceful control law (bearing and range estimated from the detection). There is no map or staging navigation — if the dock is not in view, the base spins until the detector sees it.
 
-1. Spin until the detector sees `detection_class`, or until `initial_perception_timeout`.
+1. Spin until the detector sees `detection_class`, or until the base has turned `search_spin_deg` (default two full rotations).
 2. Enter the vision-control loop. Each cycle, estimate bearing from where the detection sits in the image and range from how large it is, filter that pose, and command a smooth velocity toward it.
 3. Leave the loop once the detection is centered within `center_tolerance` and at least `close_percent` of the image wide.
 4. If `power_sensor` is set, wait up to `wait_charge_timeout` for the voltage to rise by `charge_voltage_delta`. If it does not, back up and retry, up to `max_retries`. If `power_sensor` is omitted, reaching the target is success.
@@ -130,6 +130,12 @@ Maximum angular speed during the approach, in deg/s.
 
 Spin speed while searching for the dock, in deg/s.
 
+### search_spin_deg
+
+*float (default: 720)*
+
+How far to spin while searching, in degrees, before giving up. `720` is two full rotations.
+
 ### slowdown_radius
 
 *float (default: 0.25)*
@@ -150,9 +156,9 @@ Vision-control loop rate, in Hz.
 
 ### initial_perception_timeout
 
-*float (default: 15)*
+*float (default: 120)*
 
-Seconds to search for the dock before failing.
+Safety limit, in seconds, for the search. The search normally ends at `search_spin_deg` first. At the default 15 deg/s, 720 degrees takes about 48 seconds.
 
 ### dock_approach_timeout
 

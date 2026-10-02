@@ -157,9 +157,10 @@ class detectionDock(Action, Reconfigurable):
         self.v_linear_max = _number(fields, "v_linear_max", 150.0) / 1000.0
         self.v_angular_max = math.radians(_number(fields, "v_angular_max", 45.0))
         self.search_angular_velocity = math.radians(_number(fields, "search_angular_velocity", 15.0))
+        self.search_spin_deg = _number(fields, "search_spin_deg", 720.0)
 
         self.controller_frequency = _number(fields, "controller_frequency", 8.0)
-        self.initial_perception_timeout = _number(fields, "initial_perception_timeout", 15.0)
+        self.initial_perception_timeout = _number(fields, "initial_perception_timeout", 120.0)
         self.dock_approach_timeout = _number(fields, "dock_approach_timeout", 30.0)
         self.external_detection_timeout = _number(fields, "external_detection_timeout", 1.0)
         self.wait_charge_timeout = _number(fields, "wait_charge_timeout", 5.0)
@@ -218,12 +219,18 @@ class detectionDock(Action, Reconfigurable):
 
     async def _acquire(self) -> bool:
         self.internal_status.state = "searching"
+        speed_deg = abs(math.degrees(self.search_angular_velocity))
+        started_spin = None
         deadline = time.monotonic() + self.initial_perception_timeout
         while self.internal_status.is_running and time.monotonic() < deadline:
+            if started_spin is not None and speed_deg * (time.monotonic() - started_spin) >= self.search_spin_deg:
+                break
             sample = await self._detect()
             if sample is not None:
                 await self.base.stop()
                 return True
+            if started_spin is None:
+                started_spin = time.monotonic()
             await self._command(0.0, self.search_angular_velocity)
             await asyncio.sleep(1.0 / self.controller_frequency)
         await self.base.stop()
