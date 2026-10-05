@@ -618,6 +618,8 @@ class detectionDock(Action, Reconfigurable):
         square_reversed = 0.0
         logged_square = False
         command_at: Optional[float] = None
+        size_mark = 0.0
+        size_mark_at = time.monotonic()
 
         while self.internal_status.is_running and time.monotonic() < deadline:
             loop_start = time.monotonic()
@@ -708,9 +710,24 @@ class detectionDock(Action, Reconfigurable):
                 elif remaining > self.micro_distance + 0.08:
                     micro = False
 
+                if filtered_size > size_mark + 0.005:
+                    size_mark = filtered_size
+                    size_mark_at = now
+                # A tilt shows up as soon as the box is wide, which is still a
+                # good approach. Keep closing until the dock is nearly full
+                # size and has stopped growing, then square up.
+                near_goal = filtered_size >= self.close_percent - 0.06
+                stalled = now - size_mark_at >= 1.0
+                # Once the short reverse starts, finish it. The dock getting
+                # smaller is the reverse itself, not a reason to drive back in.
+                backing = 0.0 < square_reversed < self.square_backup_m
                 if micro:
                     linear, angular = self._micro_velocity(
-                        psi, filtered_size, control_yaw, square_reversed
+                        psi,
+                        filtered_size,
+                        control_yaw,
+                        square_reversed,
+                        (near_goal and stalled) or backing,
                     )
                     # The reverse is what keeps the dock in frame while the
                     # heading changes. The settle hold would cancel it.
@@ -799,21 +816,23 @@ class detectionDock(Action, Reconfigurable):
         filtered_size: float,
         filtered_yaw: Optional[float],
         reversed_m: float,
+        allow_square: bool,
     ) -> Tuple[float, float]:
         """Small correction once the dock is close. Heading is left-positive.
 
         Driving forward while angled runs a corner into obstacle avoidance and
-        the base stops. Spinning in place swings the dock out of the camera.
-        Back up a short distance while turning the whole way. The turn follows
-        the surface yaw, and switches to the image bearing only once the dock
-        has left the center tolerance.
+        the base stops. That reverse waits until the approach has stalled near
+        the goal size. Spinning in place swings the dock out of the camera, so
+        the reverse turns the whole way. The turn follows the surface yaw, and
+        switches to the image bearing only once the dock has left the center
+        tolerance.
         """
         bearing_tol = self.center_tolerance * math.radians(self.camera_fov_deg)
         yaw_err = 0.0 if filtered_yaw is None else filtered_yaw
         bearing_outside = abs(psi) > bearing_tol
         yaw_outside = filtered_yaw is not None and abs(yaw_err) > self.surface_yaw_tolerance
         turn = min(self.close_angular_max, math.radians(10.0))
-        if yaw_outside:
+        if yaw_outside and allow_square:
             angular = math.copysign(turn, yaw_err if abs(psi) <= bearing_tol else psi)
             if reversed_m < self.square_backup_m:
                 return -self.v_linear_min, angular
