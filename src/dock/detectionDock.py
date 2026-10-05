@@ -176,6 +176,34 @@ def _median(values: List[int]) -> float:
     return (ordered[mid - 1] + ordered[mid]) / 2.0
 
 
+class _AngleMedian:
+    """Median of recent angles, ignoring a spike far from the current value.
+
+    Depth on the two sides of a close detection can disagree for a frame and
+    report a tilt the base cannot have rotated through. Those samples must not
+    steer.
+    """
+
+    def __init__(self, window: int = 11, jump_rad: float = math.radians(20.0), reject_limit: int = 4):
+        self._samples: deque = deque(maxlen=window)
+        self._value: Optional[float] = None
+        self._rejects = 0
+        self._jump = jump_rad
+        self._reject_limit = reject_limit
+
+    def add(self, sample: float) -> float:
+        if self._value is not None and abs(_wrap(sample - self._value)) > self._jump:
+            self._rejects += 1
+            if self._rejects <= self._reject_limit:
+                return self._value
+            self._samples.clear()
+        self._rejects = 0
+        self._samples.append(sample)
+        ordered = sorted(self._samples)
+        self._value = ordered[len(ordered) // 2]
+        return self._value
+
+
 @dataclass
 class _TurnSettle:
     committed: int = 0
@@ -357,7 +385,7 @@ class detectionDock(Action, Reconfigurable):
         # Close in, a noisy box center makes bearing flip every cycle. Filter
         # harder, and do not reverse the spin until the base has been still
         # long enough for that filtered bearing to stay on one side.
-        self.close_filter_coef = 0.15
+        self.close_filter_coef = 0.08
         self.bearing_settle = 0.5
         self.search_angular_velocity = math.radians(_number(fields, "search_angular_velocity", 10.0))
         self.search_spin_deg = _number(fields, "search_spin_deg", 720.0)
@@ -583,6 +611,7 @@ class detectionDock(Action, Reconfigurable):
         turn_state = _TurnSettle()
         holding_turn = False
         aligned_since: Optional[float] = None
+        yaw_filter = _AngleMedian()
 
         while self.internal_status.is_running and time.monotonic() < deadline:
             loop_start = time.monotonic()
@@ -620,10 +649,7 @@ class detectionDock(Action, Reconfigurable):
                     if not self.internal_status.using_depth:
                         self._log_step("using_depth")
                     self.internal_status.using_depth = True
-                    if filtered_yaw is None:
-                        filtered_yaw = sample.surface_yaw
-                    else:
-                        filtered_yaw = _wrap(filtered_yaw + coef * _wrap(sample.surface_yaw - filtered_yaw))
+                    filtered_yaw = yaw_filter.add(sample.surface_yaw)
                     self.internal_status.surface_yaw_deg = math.degrees(filtered_yaw)
 
                 psi = -filtered_center * math.radians(self.camera_fov_deg)
@@ -724,12 +750,19 @@ class detectionDock(Action, Reconfigurable):
 
     def _micro_velocity(self, psi: float, filtered_size: float, filtered_yaw: Optional[float]) -> Tuple[float, float]:
         """Small correction once the dock is close. Heading is left-positive."""
-        size_error = self.close_percent - filtered_size
-        linear = self.micro_linear * max(-1.0, min(1.0, size_error / 0.10))
-        if size_error > 0.01:
-            linear = max(linear, 0.03)
-        elif size_error < -0.02:
-            linear = min(linear, -0.03)
+        # At the goal, hold still. A slight overshoot used to command a hard
+        # reverse, which moved the dock in the image and started the hunt.
+        if filtered_size >= self.close_percent:
+            over = filtered_size - self.close_percent
+            if over > 0.08:
+                linear = -self.micro_linear * min(1.0, (over - 0.08) / 0.10)
+            else:
+                linear = 0.0
+        else:
+            size_error = self.close_percent - filtered_size
+            linear = self.micro_linear * max(0.0, min(1.0, size_error / 0.10))
+            if size_error > 0.01:
+                linear = max(linear, 0.03)
 
         bearing_tol = self.center_tolerance * math.radians(self.camera_fov_deg)
         yaw_err = 0.0 if filtered_yaw is None else filtered_yaw
@@ -737,19 +770,20 @@ class detectionDock(Action, Reconfigurable):
         yaw_outside = filtered_yaw is not None and abs(yaw_err) > self.surface_yaw_tolerance
         # Noise inside either tolerance must not flip the spin. Only an error
         # that is actually outside its tolerance is allowed to pick a direction.
+        # A yaw correction yields once the image bearing leaves the inner half
+        # of its band, so squaring up cannot walk a centered dock back out.
         if bearing_outside and yaw_outside:
             heading = psi + yaw_err
         elif bearing_outside:
             heading = psi
-        elif yaw_outside:
+        elif yaw_outside and abs(psi) <= bearing_tol * 0.5:
             heading = yaw_err
+        elif yaw_outside:
+            heading = psi
         else:
             return linear, 0.0
 
-        angular = max(-self.close_angular_max, min(self.close_angular_max, heading))
-        if abs(heading) > math.radians(3.0):
-            floor = min(self.close_angular_max, math.radians(5.0))
-            angular = math.copysign(max(abs(angular), floor), heading)
+        angular = max(-self.close_angular_max, min(self.close_angular_max, 0.5 * heading))
         return linear, angular
 
     def _approach_velocity(self, psi: float, distance: float, goal_yaw: float) -> Tuple[float, float]:
