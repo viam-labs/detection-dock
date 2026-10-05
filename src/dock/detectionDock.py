@@ -184,20 +184,16 @@ class _AngleMedian:
     steer.
     """
 
-    def __init__(self, window: int = 11, jump_rad: float = math.radians(20.0), reject_limit: int = 4):
+    def __init__(self, window: int = 11, jump_rad: float = math.radians(20.0)):
         self._samples: deque = deque(maxlen=window)
         self._value: Optional[float] = None
-        self._rejects = 0
         self._jump = jump_rad
-        self._reject_limit = reject_limit
 
     def add(self, sample: float) -> float:
+        # A dock face cannot jump tens of degrees in one frame. Keep the last
+        # median instead of adopting the spike.
         if self._value is not None and abs(_wrap(sample - self._value)) > self._jump:
-            self._rejects += 1
-            if self._rejects <= self._reject_limit:
-                return self._value
-            self._samples.clear()
-        self._rejects = 0
+            return self._value
         self._samples.append(sample)
         ordered = sorted(self._samples)
         self._value = ordered[len(ordered) // 2]
@@ -658,7 +654,8 @@ class detectionDock(Action, Reconfigurable):
                 self.internal_status.relative_size = filtered_size
                 last_center, last_size, last_yaw = filtered_center, filtered_size, filtered_yaw
 
-                squared = filtered_yaw is None or abs(filtered_yaw) <= self.surface_yaw_tolerance
+                control_yaw = self._trusted_yaw(filtered_size, filtered_yaw)
+                squared = control_yaw is None or abs(control_yaw) <= self.surface_yaw_tolerance
                 aligned = (
                     filtered_size >= self.close_percent
                     and abs(filtered_center) <= self.center_tolerance
@@ -698,7 +695,7 @@ class detectionDock(Action, Reconfigurable):
                     micro = False
 
                 if micro:
-                    linear, angular = self._micro_velocity(psi, filtered_size, filtered_yaw)
+                    linear, angular = self._micro_velocity(psi, filtered_size, control_yaw)
                     angular, holding = _settled_turn(angular, now, turn_state, self.bearing_settle, moving)
                     if holding and not holding_turn:
                         self._log_step(
@@ -715,8 +712,10 @@ class detectionDock(Action, Reconfigurable):
                     turn_state.pending = 0
                     turn_state.pending_since = None
                     holding_turn = False
-                    goal_yaw = -filtered_yaw if filtered_yaw is not None else psi
-                    linear, angular = self._approach_velocity(psi, distance, goal_yaw)
+                    # Head toward the dock. Surface tilt at long range sits near
+                    # -27 deg no matter the image bearing, so steering on it
+                    # turns the dock out of frame before the base gets close.
+                    linear, angular = self._approach_velocity(psi, distance, psi)
                     if remaining <= max(self.slowdown_radius, 0.15):
                         angular = max(-self.close_angular_max, min(self.close_angular_max, angular))
 
@@ -747,6 +746,20 @@ class detectionDock(Action, Reconfigurable):
             **self._pose_fields(last_center, last_size, last_yaw),
         )
         return False
+
+    def _trusted_yaw(self, size: Optional[float], yaw: Optional[float]) -> Optional[float]:
+        """Yaw worth steering on. A narrow box, or a tilt past 20 deg, is not.
+
+        Far from the dock the left and right depth samples are a few centimeters
+        apart, so a small depth bias reads as about -27 deg on every approach.
+        Up close, a bad pair of samples reads as 45 deg or more and flips sign.
+        Neither should turn the base.
+        """
+        if size is None or yaw is None or size < 0.35:
+            return None
+        if abs(yaw) > math.radians(20.0):
+            return None
+        return yaw
 
     def _micro_velocity(self, psi: float, filtered_size: float, filtered_yaw: Optional[float]) -> Tuple[float, float]:
         """Small correction once the dock is close. Heading is left-positive."""
