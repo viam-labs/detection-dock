@@ -2,8 +2,9 @@ import asyncio
 import math
 import time
 from array import array
+from collections import deque
 from dataclasses import dataclass
-from typing import Any, ClassVar, List, Mapping, Optional, Sequence, Tuple, cast
+from typing import Any, ClassVar, Dict, List, Mapping, Optional, Sequence, Tuple, cast
 
 from typing_extensions import Self
 from viam.components.base import Base
@@ -268,6 +269,12 @@ class detectionDock(Action, Reconfigurable):
         my_class.internal_status = Status()
         my_class.power_sensor = None
         my_class.depth_camera = None
+        my_class._attempts = deque()
+        my_class._run_serial = 0
+        my_class._current_attempt = None
+        my_class._attempt_t0 = 0.0
+        my_class._attempt_result = ""
+        my_class.attempt_history = 8
         my_class.reconfigure(config, dependencies)
         return my_class
 
@@ -365,9 +372,20 @@ class detectionDock(Action, Reconfigurable):
         self.max_retries = int(_number(fields, "max_retries", 3, allow_zero=True))
         self.backup_distance_mm = int(_number(fields, "backup_distance_mm", 300, allow_zero=True))
         self.filter_coef = min(max(_number(fields, "filter_coef", 0.45), 0.01), 1.0)
+        self.attempt_history = max(0, int(_number(fields, "attempt_history", 8, allow_zero=True)))
 
         if not hasattr(self, "internal_status"):
             self.internal_status = Status()
+        if not hasattr(self, "_run_serial"):
+            self._run_serial = 0
+            self._current_attempt = None
+            self._attempt_t0 = 0.0
+            self._attempt_result = ""
+        kept = list(getattr(self, "_attempts", ()))
+        if self.attempt_history <= 0:
+            self._attempts = deque()
+        else:
+            self._attempts = deque(kept[-self.attempt_history :], maxlen=self.attempt_history)
 
     async def dock(self):
         self.internal_status.is_running = True
@@ -376,45 +394,138 @@ class detectionDock(Action, Reconfigurable):
         self.internal_status.using_depth = False
         self.internal_status.surface_yaw_deg = 0.0
         self.internal_status.state = "searching"
+        self._run_serial += 1
 
         try:
-            for attempt in range(self.max_retries + 1):
+            for retry in range(self.max_retries + 1):
                 if not self.internal_status.is_running:
                     break
-                self.internal_status.retry_count = attempt
-                LOGGER.info("dock attempt %s", attempt + 1)
+                self.internal_status.retry_count = retry
+                self._begin_attempt(retry)
+                self._log_step("searching")
 
-                if not await self._acquire():
-                    if self.internal_status.is_running:
-                        LOGGER.warning("dock not detected")
+                found = await self._acquire()
+                if not self.internal_status.is_running:
+                    self._log_step("stopped")
+                    self._finish_attempt("stopped")
+                    break
+                if not found:
+                    self._finish_attempt(self._attempt_result or "dock not detected")
                     break
 
-                if await self._approach():
+                approached = await self._approach()
+                if not self.internal_status.is_running:
+                    self._log_step("stopped")
+                    self._finish_attempt("stopped")
+                    break
+                if approached:
                     if self.power_sensor is None:
+                        self._log_step("docked")
+                        self._finish_attempt("docked")
                         self._mark_docked()
                         return
                     self.internal_status.state = "waiting_charge"
                     if await self._wait_for_charge():
+                        self._log_step("docked")
+                        self._finish_attempt("docked")
                         self._mark_docked()
                         return
-                    LOGGER.info("charging not detected")
+                    self._attempt_result = "charging not detected"
 
-                if self.internal_status.is_running:
-                    await self._backup()
+                if not self.internal_status.is_running:
+                    self._log_step("stopped")
+                    self._finish_attempt("stopped")
+                    break
+                await self._backup()
+                self._finish_attempt(self._attempt_result or "approach failed")
 
             if not self.internal_status.is_docked:
                 self.internal_status.state = "idle" if not self.internal_status.is_running else "failed"
+        except Exception as exc:
+            self._attempt_result = f"error: {exc}"
+            self._log_step("error", message=str(exc))
+            LOGGER.exception("docking failed")
+            raise
         finally:
+            if self._current_attempt is not None:
+                self._finish_attempt(self._attempt_result or "stopped")
             self.internal_status.is_running = False
             try:
                 await self.base.stop()
             except Exception:
                 LOGGER.exception("failed to stop base")
 
+    def _begin_attempt(self, retry: int):
+        self._attempt_t0 = time.monotonic()
+        self._attempt_result = ""
+        self._current_attempt = {
+            "run": self._run_serial,
+            "retry": retry,
+            "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "result": "running",
+            "steps": [],
+        }
+
+    def _log_step(self, step: str, **fields: Any):
+        current = self._current_attempt
+        if current is None:
+            return
+        record: Dict[str, Any] = {"t_s": round(time.monotonic() - self._attempt_t0, 2), "step": step}
+        for key, value in fields.items():
+            if value is None:
+                continue
+            record[key] = _log_value(key, value)
+        steps: List[Dict[str, Any]] = current["steps"]
+        steps.append(record)
+        if len(steps) > 80:
+            del steps[: len(steps) - 80]
+        detail = " ".join(f"{key}={record[key]}" for key in record if key not in ("t_s", "step"))
+        if detail:
+            LOGGER.info("dock run %s retry %s %s %s", current["run"], current["retry"], step, detail)
+        else:
+            LOGGER.info("dock run %s retry %s %s", current["run"], current["retry"], step)
+
+    def _finish_attempt(self, result: str):
+        current = self._current_attempt
+        if current is None:
+            return
+        current["result"] = result
+        self._current_attempt = None
+        if self.attempt_history > 0:
+            self._attempts.append(current)
+        LOGGER.info("dock run %s retry %s finished: %s", current["run"], current["retry"], result)
+
+    def _pose_fields(self, center: Optional[float], size: Optional[float], yaw: Optional[float]) -> Dict[str, float]:
+        fields: Dict[str, float] = {}
+        if size is not None:
+            fields["relative_size"] = size
+        if center is not None:
+            fields["bearing_deg"] = -center * self.camera_fov_deg
+        if yaw is not None:
+            fields["surface_yaw_deg"] = math.degrees(yaw)
+        return fields
+
+    def _alignment_gap(self, size: Optional[float], center: Optional[float], yaw: Optional[float]) -> str:
+        if size is None or center is None:
+            return "no detection"
+        gaps = []
+        if size < self.close_percent:
+            gaps.append(f"size {size:.2f} below {self.close_percent:.2f}")
+        bearing_deg = -center * self.camera_fov_deg
+        bearing_limit = self.center_tolerance * self.camera_fov_deg
+        if abs(center) > self.center_tolerance:
+            gaps.append(f"bearing {bearing_deg:.1f} deg outside {bearing_limit:.1f}")
+        if yaw is not None and abs(yaw) > self.surface_yaw_tolerance:
+            gaps.append(
+                f"surface yaw {math.degrees(yaw):.1f} deg outside {math.degrees(self.surface_yaw_tolerance):.1f}"
+            )
+        if not gaps:
+            return "in tolerance but not held"
+        return "; ".join(gaps)
+
     def _mark_docked(self):
         self.internal_status.is_docked = True
         self.internal_status.state = "docked"
-        LOGGER.info("docked")
 
     async def _acquire(self) -> bool:
         self.internal_status.state = "searching"
@@ -422,31 +533,49 @@ class detectionDock(Action, Reconfigurable):
         settle_until = time.monotonic() + self.search_settle
         speed_deg = abs(math.degrees(self.search_angular_velocity))
         started_spin = None
+        exit_reason = "search timed out"
         deadline = time.monotonic() + self.initial_perception_timeout
         while self.internal_status.is_running and time.monotonic() < deadline:
             loop_start = time.monotonic()
             if started_spin is not None and speed_deg * (time.monotonic() - started_spin) >= self.search_spin_deg:
+                exit_reason = "search finished without a detection"
                 break
             sample = await self._detect()
             if sample is not None:
+                yaw = None if sample.surface_yaw is None else math.degrees(sample.surface_yaw)
+                self._log_step(
+                    "dock_detected",
+                    bearing_deg=-sample.center_offset * self.camera_fov_deg,
+                    relative_size=sample.relative_size,
+                    surface_yaw_deg=yaw,
+                )
                 await self.base.stop()
                 return True
             if time.monotonic() >= settle_until:
                 if started_spin is None:
                     started_spin = time.monotonic()
+                    self._log_step("search_spin", angular_deg_s=math.degrees(self.search_angular_velocity))
                 await self._command(0.0, self.search_angular_velocity)
             elapsed = time.monotonic() - loop_start
             await asyncio.sleep(max(0.0, (1.0 / self.controller_frequency) - elapsed))
         await self.base.stop()
+        if not self.internal_status.is_running:
+            return False
+        self._attempt_result = exit_reason
+        self._log_step("search_exhausted" if exit_reason.startswith("search finished") else "search_timed_out")
         return False
 
     async def _approach(self) -> bool:
         self.internal_status.state = "approaching"
+        self._log_step("approaching")
         deadline = time.monotonic() + self.dock_approach_timeout
         last_seen = time.monotonic()
         filtered_center: Optional[float] = None
         filtered_size: Optional[float] = None
         filtered_yaw: Optional[float] = None
+        last_center: Optional[float] = None
+        last_size: Optional[float] = None
+        last_yaw: Optional[float] = None
         commanded_linear = 0.0
         commanded_angular = 0.0
         micro = False
@@ -460,7 +589,19 @@ class detectionDock(Action, Reconfigurable):
             sample = await self._detect()
             if sample is None:
                 if time.monotonic() - last_seen > self.external_detection_timeout:
-                    LOGGER.info("lost dock detection")
+                    because = (
+                        "detection never returned"
+                        if last_center is None
+                        else self._alignment_gap(last_size, last_center, last_yaw)
+                    )
+                    self._attempt_result = "lost dock detection"
+                    self._log_step(
+                        "lost_dock_detection",
+                        because=because,
+                        linear_mm_s=commanded_linear * 1000.0,
+                        angular_deg_s=math.degrees(commanded_angular),
+                        **self._pose_fields(last_center, last_size, last_yaw),
+                    )
                     await self.base.stop()
                     return False
             else:
@@ -477,7 +618,7 @@ class detectionDock(Action, Reconfigurable):
 
                 if sample.surface_yaw is not None:
                     if not self.internal_status.using_depth:
-                        LOGGER.info("aligning to the dock surface with depth")
+                        self._log_step("using_depth")
                     self.internal_status.using_depth = True
                     if filtered_yaw is None:
                         filtered_yaw = sample.surface_yaw
@@ -489,6 +630,7 @@ class detectionDock(Action, Reconfigurable):
                 distance = self.docking_distance * (self.close_percent / max(filtered_size, 1e-3))
                 self.internal_status.bearing_deg = math.degrees(psi)
                 self.internal_status.relative_size = filtered_size
+                last_center, last_size, last_yaw = filtered_center, filtered_size, filtered_yaw
 
                 squared = filtered_yaw is None or abs(filtered_yaw) <= self.surface_yaw_tolerance
                 aligned = (
@@ -500,8 +642,15 @@ class detectionDock(Action, Reconfigurable):
                 if aligned and not moving:
                     if aligned_since is None:
                         aligned_since = now
-                        LOGGER.info("bearing in tolerance, holding still to let it settle")
+                        self._log_step(
+                            "holding_alignment",
+                            **self._pose_fields(filtered_center, filtered_size, filtered_yaw),
+                        )
                     elif now - aligned_since >= self.bearing_settle:
+                        self._log_step(
+                            "aligned",
+                            **self._pose_fields(filtered_center, filtered_size, filtered_yaw),
+                        )
                         await self.base.stop()
                         return True
                 else:
@@ -514,7 +663,10 @@ class detectionDock(Action, Reconfigurable):
                 remaining = distance - self.docking_distance
                 if remaining <= self.micro_distance:
                     if not micro:
-                        LOGGER.info("micro-adjusting near the dock")
+                        self._log_step(
+                            "micro_adjusting",
+                            **self._pose_fields(filtered_center, filtered_size, filtered_yaw),
+                        )
                     micro = True
                 elif remaining > self.micro_distance + 0.08:
                     micro = False
@@ -523,9 +675,11 @@ class detectionDock(Action, Reconfigurable):
                     linear, angular = self._micro_velocity(psi, filtered_size, filtered_yaw)
                     angular, holding = _settled_turn(angular, now, turn_state, self.bearing_settle, moving)
                     if holding and not holding_turn:
-                        LOGGER.info(
-                            "bearing changed, holding still to let it settle (bearing %.1f deg)",
-                            self.internal_status.bearing_deg,
+                        self._log_step(
+                            "holding_bearing",
+                            linear_mm_s=commanded_linear * 1000.0,
+                            angular_deg_s=math.degrees(commanded_angular),
+                            **self._pose_fields(filtered_center, filtered_size, filtered_yaw),
                         )
                     holding_turn = holding
                     if holding or aligned:
@@ -555,6 +709,17 @@ class detectionDock(Action, Reconfigurable):
             await asyncio.sleep(max(0.0, (1.0 / self.controller_frequency) - elapsed))
 
         await self.base.stop()
+        if not self.internal_status.is_running:
+            return False
+        because = self._alignment_gap(last_size, last_center, last_yaw)
+        self._attempt_result = f"approach timed out: {because}"
+        self._log_step(
+            "approach_timed_out",
+            because=because,
+            linear_mm_s=commanded_linear * 1000.0,
+            angular_deg_s=math.degrees(commanded_angular),
+            **self._pose_fields(last_center, last_size, last_yaw),
+        )
         return False
 
     def _micro_velocity(self, psi: float, filtered_size: float, filtered_yaw: Optional[float]) -> Tuple[float, float]:
@@ -647,12 +812,26 @@ class detectionDock(Action, Reconfigurable):
         if self.power_sensor is None:
             return True
         start_voltage, _ = await self.power_sensor.get_voltage()
+        voltage = start_voltage
+        self._log_step("waiting_for_charge", voltage_v=float(start_voltage))
         deadline = time.monotonic() + self.wait_charge_timeout
         while self.internal_status.is_running and time.monotonic() < deadline:
             await asyncio.sleep(0.2)
             voltage, _ = await self.power_sensor.get_voltage()
             if voltage - start_voltage > self.charge_voltage_delta:
+                self._log_step(
+                    "charge_detected",
+                    voltage_v=float(voltage),
+                    voltage_delta_v=float(voltage - start_voltage),
+                )
                 return True
+        if not self.internal_status.is_running:
+            return False
+        self._log_step(
+            "charging_not_detected",
+            voltage_v=float(voltage),
+            voltage_delta_v=float(voltage - start_voltage),
+        )
         return False
 
     async def _backup(self):
@@ -665,7 +844,7 @@ class detectionDock(Action, Reconfigurable):
             return
         self.internal_status.state = "backing_up"
         duration = (self.backup_distance_mm / 1000.0) / speed
-        LOGGER.info("backing up %s mm before retry", self.backup_distance_mm)
+        self._log_step("backing_up", distance_mm=self.backup_distance_mm)
         try:
             await self._command(-speed, 0.0)
             deadline = time.monotonic() + duration
@@ -699,8 +878,21 @@ class detectionDock(Action, Reconfigurable):
     async def is_running(self) -> bool:
         return self.internal_status.is_running
 
+    def _attempt_view(self, attempt: Mapping[str, Any]) -> Dict[str, Any]:
+        return {
+            "run": attempt["run"],
+            "retry": attempt["retry"],
+            "started_at": attempt["started_at"],
+            "result": attempt["result"],
+            "steps": list(attempt["steps"]),
+        }
+
     async def status(self) -> Mapping[str, Any]:
         status = self.internal_status
+        attempts = [self._attempt_view(attempt) for attempt in self._attempts]
+        if self._current_attempt is not None:
+            attempts.append(self._attempt_view(self._current_attempt))
+        attempts.reverse()
         return {
             "is_running": status.is_running,
             "is_docked": status.is_docked,
@@ -710,7 +902,20 @@ class detectionDock(Action, Reconfigurable):
             "surface_yaw_deg": status.surface_yaw_deg,
             "using_depth": status.using_depth,
             "relative_size": status.relative_size,
+            "attempts": attempts,
         }
+
+
+def _log_value(key: str, value: Any) -> Any:
+    if not isinstance(value, float):
+        return value
+    if key in ("relative_size", "voltage_v", "voltage_delta_v"):
+        return round(value, 3)
+    if key.endswith("_deg") or key.endswith("_deg_s"):
+        return round(value, 1)
+    if key.endswith("_mm_s"):
+        return round(value, 1)
+    return round(value, 3)
 
 
 def _string(fields, name: str, default: str) -> str:

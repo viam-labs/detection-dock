@@ -226,8 +226,16 @@ Voltage increase, in volts, that counts as charging. Used only when `power_senso
 
 Exponential smoothing weight for the detected pose, from 0 to 1. Higher values trust the latest detection more.
 
-`status` reports `is_running`, `is_docked`, `state` (`idle`, `searching`, `approaching`, `backing_up`, `waiting_charge`, `docked`, `failed`), `retry_count`, `bearing_deg`, `surface_yaw_deg`, `using_depth`, and `relative_size`.
+### attempt_history
+
+*integer (default: 8)*
+
+How many finished docking attempts to keep. Each retry counts as an attempt. `0` keeps none. The attempt in progress is still reported while it runs.
+
+`status` reports `is_running`, `is_docked`, `state` (`idle`, `searching`, `approaching`, `backing_up`, `waiting_charge`, `docked`, `failed`), `retry_count`, `bearing_deg`, `surface_yaw_deg`, `using_depth`, `relative_size`, and `attempts`.
+
+`attempts` is newest first. Each entry has `run` (one `start` call), `retry` (0-based try within that run), `started_at`, `result`, and `steps`. `result` is `running` or why the try ended: `docked`, `stopped`, `search timed out`, `search finished without a detection`, `lost dock detection`, `charging not detected`, or `approach timed out` followed by the bearing, size, and surface yaw that were still short of the goal. Each step has `t_s` (seconds from the start of that try) and `step`, plus pose fields when they matter (`bearing_deg`, `relative_size`, `surface_yaw_deg`, `linear_mm_s`, `angular_deg_s`).
 
 ## Troubleshooting
 
-Add troubleshooting notes here.
+Read `status.attempts` after a run. The first entry is the latest try, and its `result` says why it stopped. `steps` shows the sequence that got there. An approach timeout includes the bearing, detection size, and surface yaw that were still outside tolerance.
