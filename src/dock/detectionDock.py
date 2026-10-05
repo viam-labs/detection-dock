@@ -378,6 +378,10 @@ class detectionDock(Action, Reconfigurable):
         self.close_angular_slew = math.radians(30.0)
         self.micro_distance = 0.12
         self.micro_linear = min(self.v_linear_min, 0.04)
+        # Short reverse while squaring up. Long enough to swing the nose
+        # without the dock leaving the camera, short enough not to hit
+        # whatever is behind the base.
+        self.square_backup_m = 0.10
         # Close in, a noisy box center makes bearing flip every cycle. Filter
         # harder, and do not reverse the spin until the base has been still
         # long enough for that filtered bearing to stay on one side.
@@ -608,9 +612,14 @@ class detectionDock(Action, Reconfigurable):
         holding_turn = False
         aligned_since: Optional[float] = None
         yaw_filter = _AngleMedian()
+        square_reversed = 0.0
+        logged_square = False
+        command_at: Optional[float] = None
 
         while self.internal_status.is_running and time.monotonic() < deadline:
             loop_start = time.monotonic()
+            if command_at is not None and commanded_linear < 0:
+                square_reversed += -commanded_linear * (loop_start - command_at)
             sample = await self._detect()
             if sample is None:
                 if time.monotonic() - last_seen > self.external_detection_timeout:
@@ -695,18 +704,35 @@ class detectionDock(Action, Reconfigurable):
                     micro = False
 
                 if micro:
-                    linear, angular = self._micro_velocity(psi, filtered_size, control_yaw)
-                    angular, holding = _settled_turn(angular, now, turn_state, self.bearing_settle, moving)
-                    if holding and not holding_turn:
-                        self._log_step(
-                            "holding_bearing",
-                            linear_mm_s=commanded_linear * 1000.0,
-                            angular_deg_s=math.degrees(commanded_angular),
-                            **self._pose_fields(filtered_center, filtered_size, filtered_yaw),
-                        )
-                    holding_turn = holding
-                    if holding or aligned:
-                        linear = 0.0
+                    linear, angular = self._micro_velocity(
+                        psi, filtered_size, control_yaw, square_reversed
+                    )
+                    # The reverse is what keeps the dock in frame while the
+                    # heading changes. The settle hold would cancel it.
+                    if linear < 0:
+                        if not logged_square:
+                            self._log_step(
+                                "squaring_up",
+                                distance_mm=int(self.square_backup_m * 1000),
+                                **self._pose_fields(filtered_center, filtered_size, filtered_yaw),
+                            )
+                            logged_square = True
+                        holding_turn = False
+                        turn_state.committed = 0
+                        turn_state.pending = 0
+                        turn_state.pending_since = None
+                    else:
+                        angular, holding = _settled_turn(angular, now, turn_state, self.bearing_settle, moving)
+                        if holding and not holding_turn:
+                            self._log_step(
+                                "holding_bearing",
+                                linear_mm_s=commanded_linear * 1000.0,
+                                angular_deg_s=math.degrees(commanded_angular),
+                                **self._pose_fields(filtered_center, filtered_size, filtered_yaw),
+                            )
+                        holding_turn = holding
+                        if holding or aligned:
+                            linear = 0.0
                 else:
                     turn_state.committed = 0
                     turn_state.pending = 0
@@ -727,6 +753,7 @@ class detectionDock(Action, Reconfigurable):
                     linear = commanded_linear + max(-linear_step, min(linear_step, linear - commanded_linear))
                 commanded_linear = linear
                 commanded_angular = angular
+                command_at = time.monotonic()
                 smooth_close = micro
                 await self._command(linear, angular)
 
@@ -761,43 +788,47 @@ class detectionDock(Action, Reconfigurable):
             return None
         return yaw
 
-    def _micro_velocity(self, psi: float, filtered_size: float, filtered_yaw: Optional[float]) -> Tuple[float, float]:
-        """Small correction once the dock is close. Heading is left-positive."""
-        # At the goal, hold still. A slight overshoot used to command a hard
-        # reverse, which moved the dock in the image and started the hunt.
-        if filtered_size >= self.close_percent:
-            over = filtered_size - self.close_percent
-            if over > 0.08:
-                linear = -self.micro_linear * min(1.0, (over - 0.08) / 0.10)
-            else:
-                linear = 0.0
-        else:
-            size_error = self.close_percent - filtered_size
-            linear = self.micro_linear * max(0.0, min(1.0, size_error / 0.10))
-            if size_error > 0.01:
-                linear = max(linear, 0.03)
+    def _micro_velocity(
+        self,
+        psi: float,
+        filtered_size: float,
+        filtered_yaw: Optional[float],
+        reversed_m: float,
+    ) -> Tuple[float, float]:
+        """Small correction once the dock is close. Heading is left-positive.
 
+        Driving forward while angled runs a corner into obstacle avoidance and
+        the base stops. Spinning in place swings the dock out of the camera.
+        Back up a short distance instead, and only turn while the dock is still
+        near the center so the heading change is kept as the target settles back.
+        """
         bearing_tol = self.center_tolerance * math.radians(self.camera_fov_deg)
         yaw_err = 0.0 if filtered_yaw is None else filtered_yaw
         bearing_outside = abs(psi) > bearing_tol
         yaw_outside = filtered_yaw is not None and abs(yaw_err) > self.surface_yaw_tolerance
-        # Noise inside either tolerance must not flip the spin. Only an error
-        # that is actually outside its tolerance is allowed to pick a direction.
-        # A yaw correction yields once the image bearing leaves the inner half
-        # of its band, so squaring up cannot walk a centered dock back out.
-        if bearing_outside and yaw_outside:
-            heading = psi + yaw_err
-        elif bearing_outside:
-            heading = psi
-        elif yaw_outside and abs(psi) <= bearing_tol * 0.5:
-            heading = yaw_err
-        elif yaw_outside:
-            heading = psi
-        else:
-            return linear, 0.0
+        turn = min(self.close_angular_max, math.radians(10.0))
+        if yaw_outside:
+            dock_centered = abs(psi) <= bearing_tol * 0.5
+            angular = math.copysign(turn, yaw_err) if dock_centered else 0.0
+            if reversed_m < self.square_backup_m:
+                return -self.v_linear_min, angular
+            if dock_centered:
+                return 0.0, angular
+            return 0.0, math.copysign(turn, psi)
+        if bearing_outside:
+            return 0.0, math.copysign(turn, psi)
 
-        angular = max(-self.close_angular_max, min(self.close_angular_max, 0.5 * heading))
-        return linear, angular
+        if filtered_size >= self.close_percent:
+            over = filtered_size - self.close_percent
+            if over > 0.08:
+                return -self.micro_linear * min(1.0, (over - 0.08) / 0.10), 0.0
+            return 0.0, 0.0
+
+        size_error = self.close_percent - filtered_size
+        linear = self.micro_linear * max(0.0, min(1.0, size_error / 0.10))
+        if size_error > 0.01:
+            linear = max(linear, 0.03)
+        return linear, 0.0
 
     def _approach_velocity(self, psi: float, distance: float, goal_yaw: float) -> Tuple[float, float]:
         goal_dist = max(distance - self.docking_distance, 1e-3)
