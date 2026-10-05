@@ -164,8 +164,9 @@ def surface_yaw_rad(
     baseline = camera_x(right - quarter / 2.0) - camera_x(left + quarter / 2.0)
     if baseline <= 1.0:
         return None
-    # Right side farther means the surface faces to the right, so yaw right.
-    return math.atan2(left_depth - right_depth, baseline)
+    # Nose already left of the surface puts the left side farther away.
+    # Positive is the correction, turn left, so that tilt has to be negated.
+    return math.atan2(right_depth - left_depth, baseline)
 
 
 def _median(values: List[int]) -> float:
