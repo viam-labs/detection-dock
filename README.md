@@ -7,8 +7,8 @@ The model this module makes available is viam-labs:dock:detection-dock
 Docking follows the same stages as the [Nav2 docking server](https://docs.nav2.org/rolling/tutorials/general_tutorials/using_docking/): find the dock, then run a vision-control loop that continuously refines the target while driving toward it. The approach uses Nav2's graceful control law (bearing and range estimated from the detection). There is no map or staging navigation — if the dock is not in view, the base spins until the detector sees it.
 
 1. Watch for `detection_class` while holding still for `search_settle` seconds, so a detection already in frame is not spun away. If it is still missing, spin at `search_angular_velocity` until the detector sees it, or until the base has turned `search_spin_deg` (default two full rotations).
-2. Enter the vision-control loop. Each cycle, estimate bearing from where the detection sits in the image and range from how large it is, filter that pose, and command a smooth velocity toward it. If a depth image is available, also measure the tilt of the surface inside the detection and steer until the robot is square to that surface. Inside the slowdown distance the turn is limited to `close_angular_max`. Within about 5 inches, that law is replaced by small moves: creep forward if the detection is still small, creep back if it is already too large, and turn slowly to fix bearing and surface tilt.
-3. Leave the loop once the detection is centered within `center_tolerance` and at least `close_percent` of the image wide. With depth, the surface also has to be within `surface_yaw_tolerance_deg` of straight on. A centered detection can still be tilted, which makes the target look smaller than it does when the robot is square.
+2. Enter the vision-control loop. Each cycle, estimate bearing from where the detection sits in the image and range from how large it is, filter that pose, and command a smooth velocity toward it. If a depth image is available, also measure the tilt of the surface inside the detection and steer until the robot is square to that surface. Inside the slowdown distance the turn is limited to `close_angular_max`. Within about 5 inches, that law is replaced by small moves: creep forward if the detection is still small, creep back if it is already too large, and turn slowly to fix bearing and surface tilt. There the pose filter tightens, and a turn starts only after the base has stopped and the filtered bearing has held one direction for about half a second. A detection that jumps across center does not immediately spin the other way.
+3. Leave the loop once the detection is centered within `center_tolerance` and at least `close_percent` of the image wide, and that alignment has held for about half a second while the base is stopped. With depth, the surface also has to be within `surface_yaw_tolerance_deg` of straight on. A centered detection can still be tilted, which makes the target look smaller than it does when the robot is square.
 4. If `power_sensor` is set, wait up to `wait_charge_timeout` for the voltage to rise by `charge_voltage_delta`. If it does not, back up and retry, up to `max_retries`. If `power_sensor` is omitted, reaching the target is success.
 
 This has been tested with [feature match detection](https://github.com/viam-labs/feature-match-detector) configured as a vision detector, but other detector types should work, as well.
@@ -102,9 +102,9 @@ Detection width, as a fraction of the image, that counts as having reached the d
 
 ### center_tolerance
 
-*float (default: 0.05)*
+*float (default: 0.08)*
 
-How far the detection center may sit from the image center, as a fraction of image width, and still count as aligned. `0.05` is 5 percent.
+How far the detection center may sit from the image center, as a fraction of image width, and still count as aligned. `0.08` is 8 percent, about 6 degrees at the default 70 degree field of view. An error inside this band does not command a turn during the final adjustments.
 
 ### surface_yaw_tolerance_deg
 
@@ -140,7 +140,7 @@ Maximum angular speed during the approach, in deg/s. Inside the slowdown distanc
 
 *float (default: 12)*
 
-Maximum turn rate, in deg/s, once the estimated range is within `slowdown_radius` of the dock (at least about 6 inches), and during the final micro-adjustments. The command eases toward that rate so it cannot reverse in one control cycle.
+Maximum turn rate, in deg/s, once the estimated range is within `slowdown_radius` of the dock (at least about 6 inches), and during the final micro-adjustments. The command eases toward that rate so it cannot reverse in one control cycle. During the final adjustments it also waits, stopped, until the bearing holds the new direction before reversing.
 
 ### search_angular_velocity
 
