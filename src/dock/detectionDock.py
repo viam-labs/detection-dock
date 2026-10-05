@@ -410,6 +410,8 @@ class detectionDock(Action, Reconfigurable):
             self._current_attempt = None
             self._attempt_t0 = 0.0
             self._attempt_result = ""
+        self._retreat_psi = 0.0
+        self._retreat_yaw = None
         kept = list(getattr(self, "_attempts", ()))
         if self.attempt_history <= 0:
             self._attempts = deque()
@@ -665,6 +667,8 @@ class detectionDock(Action, Reconfigurable):
                 last_center, last_size, last_yaw = filtered_center, filtered_size, filtered_yaw
 
                 control_yaw = self._trusted_yaw(filtered_size, filtered_yaw)
+                self._retreat_psi = psi
+                self._retreat_yaw = control_yaw
                 squared = control_yaw is None or abs(control_yaw) <= self.surface_yaw_tolerance
                 aligned = (
                     filtered_size >= self.close_percent
@@ -800,8 +804,9 @@ class detectionDock(Action, Reconfigurable):
 
         Driving forward while angled runs a corner into obstacle avoidance and
         the base stops. Spinning in place swings the dock out of the camera.
-        Back up a short distance instead, and only turn while the dock is still
-        near the center so the heading change is kept as the target settles back.
+        Back up a short distance while turning the whole way. The turn follows
+        the surface yaw, and switches to the image bearing only once the dock
+        has left the center tolerance.
         """
         bearing_tol = self.center_tolerance * math.radians(self.camera_fov_deg)
         yaw_err = 0.0 if filtered_yaw is None else filtered_yaw
@@ -809,13 +814,10 @@ class detectionDock(Action, Reconfigurable):
         yaw_outside = filtered_yaw is not None and abs(yaw_err) > self.surface_yaw_tolerance
         turn = min(self.close_angular_max, math.radians(10.0))
         if yaw_outside:
-            dock_centered = abs(psi) <= bearing_tol * 0.5
-            angular = math.copysign(turn, yaw_err) if dock_centered else 0.0
+            angular = math.copysign(turn, yaw_err if abs(psi) <= bearing_tol else psi)
             if reversed_m < self.square_backup_m:
                 return -self.v_linear_min, angular
-            if dock_centered:
-                return 0.0, angular
-            return 0.0, math.copysign(turn, psi)
+            return 0.0, angular
         if bearing_outside:
             return 0.0, math.copysign(turn, psi)
 
@@ -923,9 +925,18 @@ class detectionDock(Action, Reconfigurable):
             return
         self.internal_status.state = "backing_up"
         duration = (self.backup_distance_mm / 1000.0) / speed
-        self._log_step("backing_up", distance_mm=self.backup_distance_mm)
+        # Arc the whole retreat so it ends squarer than it started. A straight
+        # reverse leaves the same tilt for the next try.
+        error = self._retreat_yaw if self._retreat_yaw is not None else self._retreat_psi
+        turn_cap = min(self.close_angular_max, math.radians(12.0))
+        angular = max(-turn_cap, min(turn_cap, error / duration)) if duration > 0 else 0.0
+        self._log_step(
+            "backing_up",
+            distance_mm=self.backup_distance_mm,
+            angular_deg_s=math.degrees(angular),
+        )
         try:
-            await self._command(-speed, 0.0)
+            await self._command(-speed, angular)
             deadline = time.monotonic() + duration
             while self.internal_status.is_running and time.monotonic() < deadline:
                 await asyncio.sleep(0.05)
