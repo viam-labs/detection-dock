@@ -1,4 +1,5 @@
 {
+  "$schema": "https://dl.viam.dev/module.schema.json",
   "module_id": "viam-labs:detection-dock",
   "visibility": "public",
   "url": "https://github.com/viam-labs/detection-dock",
@@ -9,5 +10,10 @@
       "model": "viam-labs:dock:detection-dock"
     }
   ],
-  "entrypoint": "run.sh"
+  "entrypoint": "run.sh",
+  "build": {
+    "arch": ["linux/arm64", "linux/amd64"],
+    "build": "make module.tar.gz",
+    "path": "module.tar.gz"
+  }
 }

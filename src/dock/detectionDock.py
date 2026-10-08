@@ -9,6 +9,7 @@ from typing import Any, ClassVar, Dict, List, Mapping, Optional, Sequence, Tuple
 from typing_extensions import Self
 from viam.components.base import Base
 from viam.components.camera import Camera
+from viam.components.pose_tracker import PoseTracker
 from viam.components.power_sensor import PowerSensor
 from viam.logging import getLogger
 from viam.media.video import CameraMimeType
@@ -285,7 +286,9 @@ class detectionDock(Action, Reconfigurable):
     depth_camera: Optional[Camera]
     base: Base
     camera: Camera
-    detector: VisionClient
+    detector: Optional[VisionClient]
+    pose_tracker: Optional[PoseTracker]
+    pose_body_name: str
     internal_status: Status
 
     @classmethod
@@ -313,15 +316,29 @@ class detectionDock(Action, Reconfigurable):
                 raise Exception(f"{name} must be defined")
             return value
 
+        def optional_str(name: str) -> str:
+            return fields[name].string_value if name in fields else ""
+
         base = required("base")
         camera = required("camera")
-        detector = required("detector")
+        # Exactly one of detector / pose_tracker must drive the sighting. The detector path
+        # extracts bearing/range from the bbox; the pose_tracker path reads them straight off
+        # a 6-DoF pose (e.g. the apriltag module's PoseTracker model), so the control loop
+        # doesn't have to re-derive what the sensor already knows.
+        detector = optional_str("detector")
+        pose_tracker = optional_str("pose_tracker")
+        if bool(detector) == bool(pose_tracker):
+            raise Exception("exactly one of detector or pose_tracker must be defined")
+        if pose_tracker and not optional_str("pose_body_name"):
+            raise Exception("pose_body_name must be defined when pose_tracker is used")
+
+        required_deps = [base, camera, detector or pose_tracker]
         optional = []
         for name in ("power_sensor", "depth_camera"):
-            value = fields[name].string_value if name in fields else ""
+            value = optional_str(name)
             if value:
                 optional.append(value)
-        return [base, camera, detector], optional
+        return required_deps, optional
 
     def reconfigure(self, config: ComponentConfig, dependencies: Mapping[ResourceName, ResourceBase]):
         fields = config.attributes.fields
@@ -332,8 +349,16 @@ class detectionDock(Action, Reconfigurable):
         camera = fields["camera"].string_value
         self.camera = cast(Camera, dependencies[Camera.get_resource_name(camera)])
 
-        detector = fields["detector"].string_value
-        self.detector = cast(VisionClient, dependencies[VisionClient.get_resource_name(detector)])
+        detector = fields["detector"].string_value if "detector" in fields else ""
+        pose_tracker = fields["pose_tracker"].string_value if "pose_tracker" in fields else ""
+        self.detector = None
+        self.pose_tracker = None
+        self.pose_body_name = ""
+        if detector:
+            self.detector = cast(VisionClient, dependencies[VisionClient.get_resource_name(detector)])
+        else:
+            self.pose_tracker = cast(PoseTracker, dependencies[PoseTracker.get_resource_name(pose_tracker)])
+            self.pose_body_name = fields["pose_body_name"].string_value
 
         power_sensor = fields["power_sensor"].string_value if "power_sensor" in fields else ""
         self.power_sensor = None
@@ -871,6 +896,11 @@ class detectionDock(Action, Reconfigurable):
         )
 
     async def _detect(self) -> Optional[Sighting]:
+        if self.pose_tracker is not None:
+            return await self._detect_from_pose()
+        return await self._detect_from_bbox()
+
+    async def _detect_from_bbox(self) -> Optional[Sighting]:
         images, _ = await self.camera.get_images()
         if not images:
             return None
@@ -906,6 +936,50 @@ class detectionDock(Action, Reconfigurable):
                 height,
                 self.camera_fov_deg,
             )
+        return Sighting(center_offset, relative_size, surface_yaw)
+
+    async def _detect_from_pose(self) -> Optional[Sighting]:
+        # The pose_tracker (e.g. the apriltag module) already produces a 6-DoF pose per body
+        # in the camera's frame via PnP. We map that directly onto the Sighting the control
+        # loop consumes so none of the downstream logic has to know a bbox was ever involved.
+        poses = await self.pose_tracker.get_poses([self.pose_body_name])
+        found = poses.get(self.pose_body_name)
+        if found is None:
+            return None
+        pose = found.pose
+        # Pose is in mm per the apriltag module. Camera convention: +x right, +y down, +z forward.
+        x_m = pose.x / 1000.0
+        y_m = pose.y / 1000.0  # noqa: F841 — kept for clarity even though docking is 2D
+        z_m = pose.z / 1000.0
+        if z_m <= 0.0:
+            return None
+        range_m = math.sqrt(x_m * x_m + z_m * z_m)
+        if range_m <= 0.0:
+            return None
+
+        # Match the bbox path's sign convention: center_offset > 0 when the target is on the
+        # image RIGHT, so the downstream `bearing = -center_offset * fov` steers the right way.
+        # A positive camera-frame x (target to the right) gives a positive bearing_rad; that
+        # is also what center_offset should be, as an image-fraction equivalent.
+        bearing_rad = math.atan2(x_m, z_m)
+        center_offset = bearing_rad / math.radians(self.camera_fov_deg)
+
+        # Synthetic relative_size: inverse-range proxy wired so that relative_size ==
+        # close_percent exactly when range == docking_distance. Keeps the existing slowdown
+        # and goal checks (`filtered_size >= close_percent`,
+        # `distance = docking_distance * close_percent / filtered_size`) correct by
+        # construction without touching any downstream math.
+        relative_size = self.close_percent * (self.docking_distance / range_m)
+
+        # AprilTag's +Z points INTO the tag surface (per pupil_apriltags). For a tag squared
+        # on to the camera, the orientation vector is roughly (0, 0, +1) — i.e. o_z ≈ +1 in
+        # the camera frame (same direction as the camera's forward axis). Rotating the tag
+        # so its right edge moves away from the camera tilts o_x positive; the camera must
+        # turn RIGHT (negative yaw) to square up. atan2(-o_x, o_z) gives 0 for a square-on
+        # tag and the right sign otherwise; `theta` on the orientation vector is pure roll
+        # about the tag normal and does not affect which way the tag faces.
+        surface_yaw = math.atan2(-pose.o_x, pose.o_z)
+
         return Sighting(center_offset, relative_size, surface_yaw)
 
     async def _wait_for_charge(self) -> bool:
