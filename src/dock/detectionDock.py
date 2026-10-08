@@ -957,25 +957,28 @@ class detectionDock(Action, Reconfigurable):
         if range_m <= 0.0:
             return None
 
-        # Downstream reads bearing as `-center_offset * camera_fov_deg` (deg) or
-        # `-center_offset * camera_fov_rad` (rad); set center_offset so this cancels out and
-        # the control loop sees the exact PnP bearing instead of an FOV-scaled image fraction.
+        # Match the bbox path's sign convention: center_offset > 0 when the target is on the
+        # image RIGHT, so the downstream `bearing = -center_offset * fov` steers the right way.
+        # A positive camera-frame x (target to the right) gives a positive bearing_rad; that
+        # is also what center_offset should be, as an image-fraction equivalent.
         bearing_rad = math.atan2(x_m, z_m)
-        center_offset = -bearing_rad / math.radians(self.camera_fov_deg)
+        center_offset = bearing_rad / math.radians(self.camera_fov_deg)
 
-        # Synthetic relative_size: inverse-square-ish range proxy wired so that
-        # relative_size == close_percent exactly when range == docking_distance. This keeps
-        # the existing slowdown and goal checks (`filtered_size >= close_percent`,
+        # Synthetic relative_size: inverse-range proxy wired so that relative_size ==
+        # close_percent exactly when range == docking_distance. Keeps the existing slowdown
+        # and goal checks (`filtered_size >= close_percent`,
         # `distance = docking_distance * close_percent / filtered_size`) correct by
         # construction without touching any downstream math.
         relative_size = self.close_percent * (self.docking_distance / range_m)
 
-        # The orientation vector's (o_x, o_y, o_z) IS the tag's +Z axis expressed in camera
-        # coords — the direction the tag is facing. Projecting onto the camera's horizontal
-        # (x,z) plane and taking atan2 gives the surface yaw. A tag directly facing the
-        # camera has o ≈ (0, 0, -1); turning left/right of the camera tilts o_x. Positive
-        # yaw means turn left, matching the bbox path's convention.
-        surface_yaw = math.atan2(pose.o_x, -pose.o_z)
+        # AprilTag's +Z points INTO the tag surface (per pupil_apriltags). For a tag squared
+        # on to the camera, the orientation vector is roughly (0, 0, +1) — i.e. o_z ≈ +1 in
+        # the camera frame (same direction as the camera's forward axis). Rotating the tag
+        # so its right edge moves away from the camera tilts o_x positive; the camera must
+        # turn RIGHT (negative yaw) to square up. atan2(-o_x, o_z) gives 0 for a square-on
+        # tag and the right sign otherwise; `theta` on the orientation vector is pure roll
+        # about the tag normal and does not affect which way the tag faces.
+        surface_yaw = math.atan2(-pose.o_x, pose.o_z)
 
         return Sighting(center_offset, relative_size, surface_yaw)
 
