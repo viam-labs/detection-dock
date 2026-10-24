@@ -6,6 +6,7 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Any, ClassVar, Dict, List, Mapping, Optional, Sequence, Tuple, cast
 
+from action_python import Action
 from typing_extensions import Self
 from viam.components.base import Base
 from viam.components.camera import Camera
@@ -19,8 +20,6 @@ from viam.proto.common import ResourceName, Vector3
 from viam.resource.base import ResourceBase
 from viam.resource.types import Model, ModelFamily
 from viam.services.vision import VisionClient
-
-from action_python import Action
 
 LOGGER = getLogger(__name__)
 

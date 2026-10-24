@@ -1,7 +1,8 @@
 import asyncio
 
-from viam.module.module import Module
 from action_python import Action
+from viam.module.module import Module
+
 from .dock import detectionDock
 
 
