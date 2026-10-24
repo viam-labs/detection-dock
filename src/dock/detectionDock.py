@@ -97,7 +97,9 @@ def _raw_depth(image) -> Optional[Tuple[array, int, int]]:
     return depths, width, height
 
 
-def _depth_strip(depths: array, width: int, height: int, x0: int, x1: int, y0: int, y1: int) -> List[int]:
+def _depth_strip(
+    depths: array, width: int, height: int, x0: int, x1: int, y0: int, y1: int
+) -> List[int]:
     values: List[int] = []
     x0 = max(0, x0)
     x1 = min(width, x1)
@@ -148,8 +150,12 @@ def surface_yaw_rad(
     if mid_bottom <= mid_top:
         mid_top, mid_bottom = top, bottom
     quarter = max(span // 4, 1)
-    left_depths = _depth_strip(depths, depth_width, depth_height, left, left + quarter, mid_top, mid_bottom)
-    right_depths = _depth_strip(depths, depth_width, depth_height, right - quarter, right, mid_top, mid_bottom)
+    left_depths = _depth_strip(
+        depths, depth_width, depth_height, left, left + quarter, mid_top, mid_bottom
+    )
+    right_depths = _depth_strip(
+        depths, depth_width, depth_height, right - quarter, right, mid_top, mid_bottom
+    )
     if len(left_depths) < 5 or len(right_depths) < 5:
         return None
 
@@ -292,7 +298,9 @@ class detectionDock(Action, Reconfigurable):
     internal_status: Status
 
     @classmethod
-    def new(cls, config: ComponentConfig, dependencies: Mapping[ResourceName, ResourceBase]) -> Self:
+    def new(
+        cls, config: ComponentConfig, dependencies: Mapping[ResourceName, ResourceBase]
+    ) -> Self:
         my_class = cls(config.name)
         my_class.internal_status = Status()
         my_class.power_sensor = None
@@ -340,7 +348,9 @@ class detectionDock(Action, Reconfigurable):
                 optional.append(value)
         return required_deps, optional
 
-    def reconfigure(self, config: ComponentConfig, dependencies: Mapping[ResourceName, ResourceBase]):
+    def reconfigure(
+        self, config: ComponentConfig, dependencies: Mapping[ResourceName, ResourceBase]
+    ):
         fields = config.attributes.fields
 
         base = fields["base"].string_value
@@ -350,17 +360,25 @@ class detectionDock(Action, Reconfigurable):
         self.camera = cast(Camera, dependencies[Camera.get_resource_name(camera)])
 
         detector = fields["detector"].string_value if "detector" in fields else ""
-        pose_tracker = fields["pose_tracker"].string_value if "pose_tracker" in fields else ""
+        pose_tracker = (
+            fields["pose_tracker"].string_value if "pose_tracker" in fields else ""
+        )
         self.detector = None
         self.pose_tracker = None
         self.pose_body_name = ""
         if detector:
-            self.detector = cast(VisionClient, dependencies[VisionClient.get_resource_name(detector)])
+            self.detector = cast(
+                VisionClient, dependencies[VisionClient.get_resource_name(detector)]
+            )
         else:
-            self.pose_tracker = cast(PoseTracker, dependencies[PoseTracker.get_resource_name(pose_tracker)])
+            self.pose_tracker = cast(
+                PoseTracker, dependencies[PoseTracker.get_resource_name(pose_tracker)]
+            )
             self.pose_body_name = fields["pose_body_name"].string_value
 
-        power_sensor = fields["power_sensor"].string_value if "power_sensor" in fields else ""
+        power_sensor = (
+            fields["power_sensor"].string_value if "power_sensor" in fields else ""
+        )
         self.power_sensor = None
         if power_sensor:
             power_name = PowerSensor.get_resource_name(power_sensor)
@@ -372,20 +390,27 @@ class detectionDock(Action, Reconfigurable):
                     power_sensor,
                 )
 
-        depth_camera = fields["depth_camera"].string_value if "depth_camera" in fields else ""
+        depth_camera = (
+            fields["depth_camera"].string_value if "depth_camera" in fields else ""
+        )
         self.depth_camera = None
         if depth_camera:
             depth_name = Camera.get_resource_name(depth_camera)
             if depth_name in dependencies:
                 self.depth_camera = cast(Camera, dependencies[depth_name])
             else:
-                LOGGER.warning("depth_camera %s is not available; docking will use image bearing only", depth_camera)
+                LOGGER.warning(
+                    "depth_camera %s is not available; docking will use image bearing only",
+                    depth_camera,
+                )
 
         self.detection_class = _string(fields, "detection_class", "match")
         self.camera_fov_deg = _number(fields, "camera_fov_deg", 70.0)
         self.close_percent = _number(fields, "close_percent", 0.45)
         self.center_tolerance = _number(fields, "center_tolerance", 0.08)
-        self.surface_yaw_tolerance = math.radians(_number(fields, "surface_yaw_tolerance_deg", 5.0))
+        self.surface_yaw_tolerance = math.radians(
+            _number(fields, "surface_yaw_tolerance_deg", 5.0)
+        )
         self.docking_distance = _number(fields, "docking_distance", 0.30)
 
         self.k_phi = _number(fields, "k_phi", 3.0)
@@ -400,7 +425,9 @@ class detectionDock(Action, Reconfigurable):
         # Near the dock the curvature term saturates and then reverses, which
         # is the violent swing. Cap the turn on the way in. Once inside
         # micro_distance, abandon that law and creep forward, back, or in yaw.
-        self.close_angular_max = math.radians(_number(fields, "close_angular_max", 12.0))
+        self.close_angular_max = math.radians(
+            _number(fields, "close_angular_max", 12.0)
+        )
         self.close_angular_slew = math.radians(30.0)
         self.micro_distance = 0.12
         self.micro_linear = min(self.v_linear_min, 0.04)
@@ -413,20 +440,30 @@ class detectionDock(Action, Reconfigurable):
         # long enough for that filtered bearing to stay on one side.
         self.close_filter_coef = 0.08
         self.bearing_settle = 0.5
-        self.search_angular_velocity = math.radians(_number(fields, "search_angular_velocity", 10.0))
+        self.search_angular_velocity = math.radians(
+            _number(fields, "search_angular_velocity", 10.0)
+        )
         self.search_spin_deg = _number(fields, "search_spin_deg", 720.0)
         self.search_settle = _number(fields, "search_settle", 2.0)
 
         self.controller_frequency = _number(fields, "controller_frequency", 20.0)
-        self.initial_perception_timeout = _number(fields, "initial_perception_timeout", 120.0)
+        self.initial_perception_timeout = _number(
+            fields, "initial_perception_timeout", 120.0
+        )
         self.dock_approach_timeout = _number(fields, "dock_approach_timeout", 30.0)
-        self.external_detection_timeout = _number(fields, "external_detection_timeout", 1.0)
+        self.external_detection_timeout = _number(
+            fields, "external_detection_timeout", 1.0
+        )
         self.wait_charge_timeout = _number(fields, "wait_charge_timeout", 5.0)
         self.charge_voltage_delta = _number(fields, "charge_voltage_delta", 0.12)
         self.max_retries = int(_number(fields, "max_retries", 3, allow_zero=True))
-        self.backup_distance_mm = int(_number(fields, "backup_distance_mm", 300, allow_zero=True))
+        self.backup_distance_mm = int(
+            _number(fields, "backup_distance_mm", 300, allow_zero=True)
+        )
         self.filter_coef = min(max(_number(fields, "filter_coef", 0.45), 0.01), 1.0)
-        self.attempt_history = max(0, int(_number(fields, "attempt_history", 8, allow_zero=True)))
+        self.attempt_history = max(
+            0, int(_number(fields, "attempt_history", 8, allow_zero=True))
+        )
 
         if not hasattr(self, "internal_status"):
             self.internal_status = Status()
@@ -441,7 +478,9 @@ class detectionDock(Action, Reconfigurable):
         if self.attempt_history <= 0:
             self._attempts = deque()
         else:
-            self._attempts = deque(kept[-self.attempt_history :], maxlen=self.attempt_history)
+            self._attempts = deque(
+                kept[-self.attempt_history :], maxlen=self.attempt_history
+            )
 
     async def dock(self):
         self.internal_status.is_running = True
@@ -496,7 +535,9 @@ class detectionDock(Action, Reconfigurable):
                 self._finish_attempt(self._attempt_result or "approach failed")
 
             if not self.internal_status.is_docked:
-                self.internal_status.state = "idle" if not self.internal_status.is_running else "failed"
+                self.internal_status.state = (
+                    "idle" if not self.internal_status.is_running else "failed"
+                )
         except Exception as exc:
             self._attempt_result = f"error: {exc}"
             self._log_step("error", message=str(exc))
@@ -526,7 +567,10 @@ class detectionDock(Action, Reconfigurable):
         current = self._current_attempt
         if current is None:
             return
-        record: Dict[str, Any] = {"t_s": round(time.monotonic() - self._attempt_t0, 2), "step": step}
+        record: Dict[str, Any] = {
+            "t_s": round(time.monotonic() - self._attempt_t0, 2),
+            "step": step,
+        }
         for key, value in fields.items():
             if value is None:
                 continue
@@ -535,11 +579,21 @@ class detectionDock(Action, Reconfigurable):
         steps.append(record)
         if len(steps) > 80:
             del steps[: len(steps) - 80]
-        detail = " ".join(f"{key}={record[key]}" for key in record if key not in ("t_s", "step"))
+        detail = " ".join(
+            f"{key}={record[key]}" for key in record if key not in ("t_s", "step")
+        )
         if detail:
-            LOGGER.info("dock run %s retry %s %s %s", current["run"], current["retry"], step, detail)
+            LOGGER.info(
+                "dock run %s retry %s %s %s",
+                current["run"],
+                current["retry"],
+                step,
+                detail,
+            )
         else:
-            LOGGER.info("dock run %s retry %s %s", current["run"], current["retry"], step)
+            LOGGER.info(
+                "dock run %s retry %s %s", current["run"], current["retry"], step
+            )
 
     def _finish_attempt(self, result: str):
         current = self._current_attempt
@@ -549,9 +603,16 @@ class detectionDock(Action, Reconfigurable):
         self._current_attempt = None
         if self.attempt_history > 0:
             self._attempts.append(current)
-        LOGGER.info("dock run %s retry %s finished: %s", current["run"], current["retry"], result)
+        LOGGER.info(
+            "dock run %s retry %s finished: %s",
+            current["run"],
+            current["retry"],
+            result,
+        )
 
-    def _pose_fields(self, center: Optional[float], size: Optional[float], yaw: Optional[float]) -> Dict[str, float]:
+    def _pose_fields(
+        self, center: Optional[float], size: Optional[float], yaw: Optional[float]
+    ) -> Dict[str, float]:
         fields: Dict[str, float] = {}
         if size is not None:
             fields["relative_size"] = size
@@ -561,7 +622,9 @@ class detectionDock(Action, Reconfigurable):
             fields["surface_yaw_deg"] = math.degrees(yaw)
         return fields
 
-    def _alignment_gap(self, size: Optional[float], center: Optional[float], yaw: Optional[float]) -> str:
+    def _alignment_gap(
+        self, size: Optional[float], center: Optional[float], yaw: Optional[float]
+    ) -> str:
         if size is None or center is None:
             return "no detection"
         gaps = []
@@ -593,12 +656,20 @@ class detectionDock(Action, Reconfigurable):
         deadline = time.monotonic() + self.initial_perception_timeout
         while self.internal_status.is_running and time.monotonic() < deadline:
             loop_start = time.monotonic()
-            if started_spin is not None and speed_deg * (time.monotonic() - started_spin) >= self.search_spin_deg:
+            if (
+                started_spin is not None
+                and speed_deg * (time.monotonic() - started_spin)
+                >= self.search_spin_deg
+            ):
                 exit_reason = "search finished without a detection"
                 break
             sample = await self._detect()
             if sample is not None:
-                yaw = None if sample.surface_yaw is None else math.degrees(sample.surface_yaw)
+                yaw = (
+                    None
+                    if sample.surface_yaw is None
+                    else math.degrees(sample.surface_yaw)
+                )
                 self._log_step(
                     "dock_detected",
                     bearing_deg=-sample.center_offset * self.camera_fov_deg,
@@ -610,7 +681,10 @@ class detectionDock(Action, Reconfigurable):
             if time.monotonic() >= settle_until:
                 if started_spin is None:
                     started_spin = time.monotonic()
-                    self._log_step("search_spin", angular_deg_s=math.degrees(self.search_angular_velocity))
+                    self._log_step(
+                        "search_spin",
+                        angular_deg_s=math.degrees(self.search_angular_velocity),
+                    )
                 await self._command(0.0, self.search_angular_velocity)
             elapsed = time.monotonic() - loop_start
             await asyncio.sleep(max(0.0, (1.0 / self.controller_frequency) - elapsed))
@@ -618,7 +692,11 @@ class detectionDock(Action, Reconfigurable):
         if not self.internal_status.is_running:
             return False
         self._attempt_result = exit_reason
-        self._log_step("search_exhausted" if exit_reason.startswith("search finished") else "search_timed_out")
+        self._log_step(
+            "search_exhausted"
+            if exit_reason.startswith("search finished")
+            else "search_timed_out"
+        )
         return False
 
     async def _approach(self) -> bool:
@@ -673,11 +751,17 @@ class detectionDock(Action, Reconfigurable):
                 last_seen = now
                 center_offset = sample.center_offset
                 relative_size = sample.relative_size
-                coef = min(self.filter_coef, self.close_filter_coef) if smooth_close else self.filter_coef
+                coef = (
+                    min(self.filter_coef, self.close_filter_coef)
+                    if smooth_close
+                    else self.filter_coef
+                )
                 if filtered_center is None or filtered_size is None:
                     filtered_center, filtered_size = center_offset, relative_size
                 else:
-                    filtered_center = (1.0 - coef) * filtered_center + coef * center_offset
+                    filtered_center = (
+                        1.0 - coef
+                    ) * filtered_center + coef * center_offset
                     filtered_size = (1.0 - coef) * filtered_size + coef * relative_size
 
                 if sample.surface_yaw is not None:
@@ -688,32 +772,48 @@ class detectionDock(Action, Reconfigurable):
                     self.internal_status.surface_yaw_deg = math.degrees(filtered_yaw)
 
                 psi = -filtered_center * math.radians(self.camera_fov_deg)
-                distance = self.docking_distance * (self.close_percent / max(filtered_size, 1e-3))
+                distance = self.docking_distance * (
+                    self.close_percent / max(filtered_size, 1e-3)
+                )
                 self.internal_status.bearing_deg = math.degrees(psi)
                 self.internal_status.relative_size = filtered_size
-                last_center, last_size, last_yaw = filtered_center, filtered_size, filtered_yaw
+                last_center, last_size, last_yaw = (
+                    filtered_center,
+                    filtered_size,
+                    filtered_yaw,
+                )
 
                 control_yaw = self._trusted_yaw(filtered_size, filtered_yaw)
                 self._retreat_psi = psi
                 self._retreat_yaw = control_yaw
-                squared = control_yaw is None or abs(control_yaw) <= self.surface_yaw_tolerance
+                squared = (
+                    control_yaw is None
+                    or abs(control_yaw) <= self.surface_yaw_tolerance
+                )
                 aligned = (
                     filtered_size >= self.close_percent
                     and abs(filtered_center) <= self.center_tolerance
                     and squared
                 )
-                moving = abs(commanded_angular) > math.radians(2.0) or abs(commanded_linear) > 0.015
+                moving = (
+                    abs(commanded_angular) > math.radians(2.0)
+                    or abs(commanded_linear) > 0.015
+                )
                 if aligned and not moving:
                     if aligned_since is None:
                         aligned_since = now
                         self._log_step(
                             "holding_alignment",
-                            **self._pose_fields(filtered_center, filtered_size, filtered_yaw),
+                            **self._pose_fields(
+                                filtered_center, filtered_size, filtered_yaw
+                            ),
                         )
                     elif now - aligned_since >= self.bearing_settle:
                         self._log_step(
                             "aligned",
-                            **self._pose_fields(filtered_center, filtered_size, filtered_yaw),
+                            **self._pose_fields(
+                                filtered_center, filtered_size, filtered_yaw
+                            ),
                         )
                         await self.base.stop()
                         return True
@@ -729,7 +829,9 @@ class detectionDock(Action, Reconfigurable):
                     if not micro:
                         self._log_step(
                             "micro_adjusting",
-                            **self._pose_fields(filtered_center, filtered_size, filtered_yaw),
+                            **self._pose_fields(
+                                filtered_center, filtered_size, filtered_yaw
+                            ),
                         )
                     micro = True
                 elif remaining > self.micro_distance + 0.08:
@@ -761,7 +863,9 @@ class detectionDock(Action, Reconfigurable):
                             self._log_step(
                                 "squaring_up",
                                 distance_mm=int(self.square_backup_m * 1000),
-                                **self._pose_fields(filtered_center, filtered_size, filtered_yaw),
+                                **self._pose_fields(
+                                    filtered_center, filtered_size, filtered_yaw
+                                ),
                             )
                             logged_square = True
                         holding_turn = False
@@ -769,13 +873,17 @@ class detectionDock(Action, Reconfigurable):
                         turn_state.pending = 0
                         turn_state.pending_since = None
                     else:
-                        angular, holding = _settled_turn(angular, now, turn_state, self.bearing_settle, moving)
+                        angular, holding = _settled_turn(
+                            angular, now, turn_state, self.bearing_settle, moving
+                        )
                         if holding and not holding_turn:
                             self._log_step(
                                 "holding_bearing",
                                 linear_mm_s=commanded_linear * 1000.0,
                                 angular_deg_s=math.degrees(commanded_angular),
-                                **self._pose_fields(filtered_center, filtered_size, filtered_yaw),
+                                **self._pose_fields(
+                                    filtered_center, filtered_size, filtered_yaw
+                                ),
                             )
                         holding_turn = holding
                         if holding or aligned:
@@ -790,14 +898,21 @@ class detectionDock(Action, Reconfigurable):
                     # turns the dock out of frame before the base gets close.
                     linear, angular = self._approach_velocity(psi, distance, psi)
                     if remaining <= max(self.slowdown_radius, 0.15):
-                        angular = max(-self.close_angular_max, min(self.close_angular_max, angular))
+                        angular = max(
+                            -self.close_angular_max,
+                            min(self.close_angular_max, angular),
+                        )
 
                 if micro or remaining <= max(self.slowdown_radius, 0.15):
                     step = self.close_angular_slew / max(self.controller_frequency, 1.0)
-                    angular = commanded_angular + max(-step, min(step, angular - commanded_angular))
+                    angular = commanded_angular + max(
+                        -step, min(step, angular - commanded_angular)
+                    )
                 if micro:
                     linear_step = 0.15 / max(self.controller_frequency, 1.0)
-                    linear = commanded_linear + max(-linear_step, min(linear_step, linear - commanded_linear))
+                    linear = commanded_linear + max(
+                        -linear_step, min(linear_step, linear - commanded_linear)
+                    )
                 commanded_linear = linear
                 commanded_angular = angular
                 command_at = time.monotonic()
@@ -821,7 +936,9 @@ class detectionDock(Action, Reconfigurable):
         )
         return False
 
-    def _trusted_yaw(self, size: Optional[float], yaw: Optional[float]) -> Optional[float]:
+    def _trusted_yaw(
+        self, size: Optional[float], yaw: Optional[float]
+    ) -> Optional[float]:
         """Yaw worth steering on. A narrow box, or a tilt past 20 deg, is not.
 
         Far from the dock the left and right depth samples are a few centimeters
@@ -855,7 +972,9 @@ class detectionDock(Action, Reconfigurable):
         bearing_tol = self.center_tolerance * math.radians(self.camera_fov_deg)
         yaw_err = 0.0 if filtered_yaw is None else filtered_yaw
         bearing_outside = abs(psi) > bearing_tol
-        yaw_outside = filtered_yaw is not None and abs(yaw_err) > self.surface_yaw_tolerance
+        yaw_outside = (
+            filtered_yaw is not None and abs(yaw_err) > self.surface_yaw_tolerance
+        )
         turn = min(self.close_angular_max, math.radians(10.0))
         if yaw_outside and allow_square:
             angular = math.copysign(turn, yaw_err if abs(psi) <= bearing_tol else psi)
@@ -877,9 +996,13 @@ class detectionDock(Action, Reconfigurable):
             linear = max(linear, 0.03)
         return linear, 0.0
 
-    def _approach_velocity(self, psi: float, distance: float, goal_yaw: float) -> Tuple[float, float]:
+    def _approach_velocity(
+        self, psi: float, distance: float, goal_yaw: float
+    ) -> Tuple[float, float]:
         goal_dist = max(distance - self.docking_distance, 1e-3)
-        r, phi, delta = ego_polar(goal_dist * math.cos(psi), goal_dist * math.sin(psi), goal_yaw)
+        r, phi, delta = ego_polar(
+            goal_dist * math.cos(psi), goal_dist * math.sin(psi), goal_yaw
+        )
         return smooth_velocity(
             r,
             phi,
@@ -917,11 +1040,17 @@ class detectionDock(Action, Reconfigurable):
             _, depth = _color_and_depth(depth_images)
 
         detections = await self.detector.get_detections(color)
-        matches = [det for det in detections if not self.detection_class or det.class_name == self.detection_class]
+        matches = [
+            det
+            for det in detections
+            if not self.detection_class or det.class_name == self.detection_class
+        ]
         if not matches:
             return None
 
-        best = max(matches, key=lambda det: (det.x_max - det.x_min) * (det.y_max - det.y_min))
+        best = max(
+            matches, key=lambda det: (det.x_max - det.x_min) * (det.y_max - det.y_min)
+        )
         center_offset = ((best.x_min + best.x_max) / 2.0) / width - 0.5
         relative_size = (best.x_max - best.x_min) / width
         surface_yaw = None
@@ -1020,9 +1149,13 @@ class detectionDock(Action, Reconfigurable):
         duration = (self.backup_distance_mm / 1000.0) / speed
         # Arc the whole retreat so it ends squarer than it started. A straight
         # reverse leaves the same tilt for the next try.
-        error = self._retreat_yaw if self._retreat_yaw is not None else self._retreat_psi
+        error = (
+            self._retreat_yaw if self._retreat_yaw is not None else self._retreat_psi
+        )
         turn_cap = min(self.close_angular_max, math.radians(12.0))
-        angular = max(-turn_cap, min(turn_cap, error / duration)) if duration > 0 else 0.0
+        angular = (
+            max(-turn_cap, min(turn_cap, error / duration)) if duration > 0 else 0.0
+        )
         self._log_step(
             "backing_up",
             distance_mm=self.backup_distance_mm,
