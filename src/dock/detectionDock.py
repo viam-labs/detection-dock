@@ -333,7 +333,7 @@ class detectionDock(Action, Reconfigurable):
 
         required_deps = [base, camera, detector or pose_tracker]
         optional = []
-        for name in ("power_sensor", "depth_camera"):
+        for name in ("power_sensor", "depth_camera", "final_base"):
             value = optional_str(name)
             if value:
                 optional.append(value)
@@ -371,6 +371,19 @@ class detectionDock(Action, Reconfigurable):
                     power_sensor,
                 )
 
+        # Obstacle avoidance sees the dock itself and stops the base short of
+        # it. The close-in creep drives this base instead, the way Nav2 docking
+        # turns off collision checking for the last stretch.
+        self.final_base = None
+        final_base = fields["final_base"].string_value if "final_base" in fields else ""
+        if final_base:
+            final_name = Base.get_resource_name(final_base)
+            if final_name in dependencies:
+                self.final_base = cast(Base, dependencies[final_name])
+            else:
+                LOGGER.warning("final_base %s is not available; the creep uses %s", final_base, base)
+        self._on_final_base = False
+
         depth_camera = fields["depth_camera"].string_value if "depth_camera" in fields else ""
         self.depth_camera = None
         if depth_camera:
@@ -407,6 +420,11 @@ class detectionDock(Action, Reconfigurable):
         # without the dock leaving the camera, short enough not to hit
         # whatever is behind the base.
         self.square_backup_m = 0.10
+        # Camera range inside which the AprilTag's angle is trusted for squaring.
+        self.tag_yaw_range = _number(fields, "tag_yaw_range_m", 0.35)
+        # With a tag pose the creep steers while it rolls; the detector path
+        # keeps its stop-and-turn creep.
+        self.steer_creep = self.pose_tracker is not None
         # Close in, a noisy box center makes bearing flip every cycle. Filter
         # harder, and do not reverse the spin until the base has been still
         # long enough for that filtered bearing to stay on one side.
@@ -506,7 +524,7 @@ class detectionDock(Action, Reconfigurable):
                 self._finish_attempt(self._attempt_result or "stopped")
             self.internal_status.is_running = False
             try:
-                await self.base.stop()
+                await self._stop_bases()
             except Exception:
                 LOGGER.exception("failed to stop base")
 
@@ -665,7 +683,7 @@ class detectionDock(Action, Reconfigurable):
                         angular_deg_s=math.degrees(commanded_angular),
                         **self._pose_fields(last_center, last_size, last_yaw),
                     )
-                    await self.base.stop()
+                    await self._stop_bases()
                     return False
             else:
                 now = time.monotonic()
@@ -712,7 +730,7 @@ class detectionDock(Action, Reconfigurable):
                             "aligned",
                             **self._pose_fields(filtered_center, filtered_size, filtered_yaw),
                         )
-                        await self.base.stop()
+                        await self._stop_bases()
                         return True
                 else:
                     aligned_since = None
@@ -765,6 +783,15 @@ class detectionDock(Action, Reconfigurable):
                         turn_state.committed = 0
                         turn_state.pending = 0
                         turn_state.pending_since = None
+                    elif linear > 0.0 and self.steer_creep:
+                        # Steering while creeping: no settle hold, the base is
+                        # rolling and the steer only nudges it.
+                        holding_turn = False
+                        turn_state.committed = 0
+                        turn_state.pending = 0
+                        turn_state.pending_since = None
+                        if aligned:
+                            linear = 0.0
                     else:
                         angular, holding = _settled_turn(angular, now, turn_state, self.bearing_settle, moving)
                         if holding and not holding_turn:
@@ -799,12 +826,12 @@ class detectionDock(Action, Reconfigurable):
                 commanded_angular = angular
                 command_at = time.monotonic()
                 smooth_close = micro
-                await self._command(linear, angular)
+                await self._command(linear, angular, close_in=micro)
 
             elapsed = time.monotonic() - loop_start
             await asyncio.sleep(max(0.0, (1.0 / self.controller_frequency) - elapsed))
 
-        await self.base.stop()
+        await self._stop_bases()
         if not self.internal_status.is_running:
             return False
         because = self._alignment_gap(last_size, last_center, last_yaw)
@@ -825,8 +852,18 @@ class detectionDock(Action, Reconfigurable):
         apart, so a small depth bias reads as about -27 deg on every approach.
         Up close, a bad pair of samples reads as 45 deg or more and flips sign.
         Neither should turn the base.
+
+        A tag pose's angle has neither problem close in, at any tilt, so with a
+        pose tracker it is trusted inside ``tag_yaw_range_m`` of camera range.
+        Far out a small tag's angle flips between solutions, so it is not.
         """
-        if size is None or yaw is None or size < 0.35:
+        if size is None or yaw is None:
+            return None
+        if self.pose_tracker is not None:
+            # The size here is a stand-in for range.
+            range_m = self.docking_distance * self.close_percent / max(size, 1e-3)
+            return yaw if range_m <= self.tag_yaw_range else None
+        if size < 0.35:
             return None
         if abs(yaw) > math.radians(20.0):
             return None
@@ -848,6 +885,12 @@ class detectionDock(Action, Reconfigurable):
         the reverse turns the whole way. The turn follows the surface yaw, and
         switches to the image bearing only once the dock has left the center
         tolerance.
+
+        With a tag pose (``steer_creep``) the creep forward also steers, halfway
+        between the tag's bearing and square to its face, instead of stopping to
+        turn whenever the bearing leaves the center tolerance. The camera sits
+        ahead of the wheels, so turning in place to center the tag swings the
+        base off square, and squaring up then moves the tag off center again.
         """
         bearing_tol = self.center_tolerance * math.radians(self.camera_fov_deg)
         yaw_err = 0.0 if filtered_yaw is None else filtered_yaw
@@ -859,20 +902,33 @@ class detectionDock(Action, Reconfigurable):
             if reversed_m < self.square_backup_m:
                 return -self.v_linear_min, angular
             return 0.0, angular
-        if bearing_outside:
+        if bearing_outside and (not self.steer_creep or abs(psi) > 2.0 * bearing_tol):
+            # The steering creep fixes a small bearing error while it rolls. A
+            # large one means the dock is drifting toward the edge of the
+            # camera: center it first.
             return 0.0, math.copysign(turn, psi)
 
         if filtered_size >= self.close_percent:
             over = filtered_size - self.close_percent
             if over > 0.08:
                 return -self.micro_linear * min(1.0, (over - 0.08) / 0.10), 0.0
+            if bearing_outside:
+                return 0.0, math.copysign(turn, psi)
             return 0.0, 0.0
 
         size_error = self.close_percent - filtered_size
         linear = self.micro_linear * max(0.0, min(1.0, size_error / 0.10))
         if size_error > 0.01:
             linear = max(linear, 0.03)
-        return linear, 0.0
+        if not self.steer_creep:
+            return linear, 0.0
+        # Steer while creeping, aiming between the tag and square to its face.
+        # The camera sits ahead of the wheels, so a turn while rolling forward
+        # moves it sideways and closes both errors. Turning in place to center
+        # the tag swings the base off square instead.
+        steer = psi if filtered_yaw is None else 0.5 * (psi + yaw_err)
+        angular = 0.0 if abs(steer) < math.radians(1.0) else max(-turn, min(turn, 1.5 * steer))
+        return linear, angular
 
     def _approach_velocity(self, psi: float, distance: float, goal_yaw: float) -> Tuple[float, float]:
         goal_dist = max(distance - self.docking_distance, 1e-3)
@@ -1036,11 +1092,26 @@ class detectionDock(Action, Reconfigurable):
             except Exception:
                 LOGGER.exception("failed to stop base after backup")
 
-    async def _command(self, linear_mps: float, angular_radps: float):
-        await self.base.set_velocity(
+    async def _command(self, linear_mps: float, angular_radps: float, close_in: bool = False):
+        use_final = close_in and self.final_base is not None
+        if use_final != self._on_final_base:
+            # The base being left must stop holding its last velocity.
+            leaving = self.base if use_final else self.final_base
+            if leaving is not None:
+                await leaving.stop()
+            self._on_final_base = use_final
+            self._log_step("final_base" if use_final else "base")
+        target = self.final_base if use_final else self.base
+        await target.set_velocity(
             linear=Vector3(x=0, y=linear_mps * 1000.0, z=0),
             angular=Vector3(x=0, y=0, z=math.degrees(angular_radps)),
         )
+
+    async def _stop_bases(self):
+        await self.base.stop()
+        if self.final_base is not None and self._on_final_base:
+            await self.final_base.stop()
+        self._on_final_base = False
 
     async def start(self) -> str:
         if not self.internal_status.is_running:
@@ -1049,10 +1120,13 @@ class detectionDock(Action, Reconfigurable):
 
     async def stop(self) -> str:
         self.internal_status.is_running = False
-        try:
-            await self.base.stop()
-        except Exception:
-            LOGGER.exception("failed to stop base")
+        for base in (self.base, self.final_base):
+            if base is None:
+                continue
+            try:
+                await base.stop()
+            except Exception:
+                LOGGER.exception("failed to stop base")
         return "OK"
 
     async def is_running(self) -> bool:

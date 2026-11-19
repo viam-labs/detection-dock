@@ -8,6 +8,7 @@ Docking follows the same stages as the [Nav2 docking server](https://docs.nav2.o
 
 1. Watch for `detection_class` while holding still for `search_settle` seconds, so a detection already in frame is not spun away. If it is still missing, spin at `search_angular_velocity` until the detector sees it, or until the base has turned `search_spin_deg` (default two full rotations).
 2. Enter the vision-control loop. Each cycle, estimate bearing from where the detection sits in the image and range from how large it is, filter that pose, and command a smooth velocity toward it. The approach steers on that image bearing. Surface tilt from depth is not used until the detection is wide, because a far reading sits near -27 degrees no matter where the dock is in the image and turning to chase it swings the dock out of frame. Inside the slowdown distance the turn is limited to `close_angular_max`. Within about 5 inches the base keeps driving in while the detection is still growing. A tilted surface is corrected only after the detection is within about 0.06 of `close_percent` and has not grown for a second: then it backs up at most 10 cm while turning for that whole reverse. The turn follows the surface yaw until the dock leaves the center of the image. Spinning in place would walk the dock off the side of the camera, and driving forward at an angle is stopped by obstacle avoidance. The reverse is kept short so the base does not hit whatever is behind it. Once it is square and centered, it creeps forward if the detection is still small. Surface tilt is used only when the detection is wide and the tilt is within 20 degrees. That tilt is the median of recent depth samples, and a frame that jumps by more than about 20 degrees is ignored. Once the detection is already at least `close_percent` wide, the base holds position instead of backing up. A turn starts only after the base has stopped and the filtered error has held one direction for about half a second.
+   With a `pose_tracker`, the tag's angle is used for squaring once the camera is within `tag_yaw_range_m` of the tag, at any tilt. The creep in also steers while it rolls, halfway between the tag's bearing and square to its face, rather than stopping to turn whenever the tag leaves `center_tolerance`. It still turns in place when the tag is more than twice `center_tolerance` off center, or once it is at the docking distance. If `final_base` is set, the creep drives that base instead of `base`.
 3. Leave the loop once the detection is centered within `center_tolerance` and at least `close_percent` of the image wide, and that alignment has held for about half a second while the base is stopped. With depth, the surface also has to be within `surface_yaw_tolerance_deg` of straight on. A centered detection can still be tilted, which makes the target look smaller than it does when the robot is square.
 4. If `power_sensor` is set, wait up to `wait_charge_timeout` for the voltage to rise by `charge_voltage_delta`. If it does not, back up and retry, up to `max_retries`. That retry reverse is an arc that takes out the yaw left over from the failed try, so the next approach starts squarer. If `power_sensor` is omitted, reaching the target is success.
 
@@ -76,6 +77,12 @@ The name of the configured [vision service detector](https://docs.viam.com/servi
 
 A separate [camera](https://docs.viam.com/components/camera/) to read depth from, when the color camera does not include a depth image. Ignored when the color camera already returns depth.
 
+### final_base
+
+*string (optional)*
+
+A [base](https://docs.viam.com/components/base/) that drives the close-in creep instead of `base`. Set this when `base` is an obstacle-avoiding base: it sees the dock itself as an obstacle and stops short of it. With the underlying base here, the last few centimeters are driven without collision checking, like the Nav2 docking server. That includes the short reverse while squaring up. Approach, search, and retry reverses still use `base`.
+
 ### power_sensor
 
 *string (optional)*
@@ -111,6 +118,12 @@ How far the detection center may sit from the image center, as a fraction of ima
 *float (default: 5)*
 
 How many degrees the dock surface may tilt, left versus right in the depth image, and still count as square. Used only when depth is available and the detection is already wide. A tilt past 20 degrees is ignored, as is a single frame that jumps by more than that from the recent median. `bearing_deg` stays the image-center bearing and can read 0 while this tilt is still large.
+
+### tag_yaw_range_m
+
+*float (default: 0.35)*
+
+Only with `pose_tracker`. Camera-to-tag range, in meters, inside which the tag's angle is trusted for squaring up. A small tag's angle is reliable close in but flips between solutions farther out.
 
 ### docking_distance
 
